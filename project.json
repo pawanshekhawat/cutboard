@@ -27,7 +27,11 @@
       "trimStart": 0,
       "trimDuration": 5,
       "transform": {
-        "opacity": 1
+        "opacity": 1,
+        "rotation": 0,
+        "x": 845,
+        "y": 331,
+        "scale": 0.5
       }
     },
     "el_text_2513b9": {
@@ -41,7 +45,10 @@
       "start": 0,
       "duration": 5,
       "transform": {
-        "opacity": 1
+        "opacity": 1,
+        "x": 500,
+        "y": 190,
+        "scale": 0.6
       }
     }
   },

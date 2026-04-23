@@ -81,6 +81,34 @@ server.get('/api/project', async (request, reply) => {
   try {
     const data = readFileSync(projectPath, 'utf-8');
     const project = JSON.parse(data);
+
+    // Auto-normalize element transforms to match schema expectations.
+    // (Prevents UI crashes when older projects only store partial transform objects.)
+    let changed = false;
+    if (project?.elements && typeof project.elements === 'object') {
+      for (const el of Object.values(project.elements)) {
+        if (!el || typeof el !== 'object') continue;
+        const t = (el as any).transform;
+        if (!t || typeof t !== 'object') {
+          (el as any).transform = { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
+          changed = true;
+          continue;
+        }
+        if (typeof t.x !== 'number') { t.x = 0; changed = true; }
+        if (typeof t.y !== 'number') { t.y = 0; changed = true; }
+        if (typeof t.scale !== 'number') { t.scale = 1; changed = true; }
+        if (typeof t.rotation !== 'number') { t.rotation = 0; changed = true; }
+        if (typeof t.opacity !== 'number') { t.opacity = 1; changed = true; }
+      }
+    }
+
+    if (changed) {
+      writeFileSync(projectPath, JSON.stringify(project, null, 2));
+      // Broadcast so connected clients re-fetch a fully-normalized project.
+      broadcastUpdate();
+      server.log.info('Normalized project.json transforms');
+    }
+
     return project;
   } catch (error: any) {
     reply.status(500).send({ error: error.message });
@@ -104,6 +132,18 @@ server.post('/api/project/element', async (request, reply) => {
       ...project.elements[elementId],
       ...updates
     };
+
+    // Normalize transform on write too (keeps project.json schema-consistent)
+    const t = project.elements[elementId]?.transform;
+    if (!t || typeof t !== 'object') {
+      project.elements[elementId].transform = { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
+    } else {
+      if (typeof t.x !== 'number') t.x = 0;
+      if (typeof t.y !== 'number') t.y = 0;
+      if (typeof t.scale !== 'number') t.scale = 1;
+      if (typeof t.rotation !== 'number') t.rotation = 0;
+      if (typeof t.opacity !== 'number') t.opacity = 1;
+    }
 
     writeFileSync(projectPath, JSON.stringify(project, null, 2));
     

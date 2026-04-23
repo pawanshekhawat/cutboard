@@ -10,8 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@theatre/core": "^0.6.1",
-    "@theatre/studio": "^0.6.1",
+    "@theatre/core": "^0.7.2",
+    "@theatre/studio": "^0.7.2",
     "axios": "^1.15.2",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"

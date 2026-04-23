@@ -91,17 +91,25 @@ export const TheatrePanel: React.FC<TheatrePanelProps> = ({ project, onUpdate })
             const el = project.elements[selectedElement];
             if (!el) return null;
 
+            // Normalize transform defaults so UI never crashes on partial projects
+            const t = el.transform as any;
+            const x = typeof t?.x === 'number' ? t.x : 0;
+            const y = typeof t?.y === 'number' ? t.y : 0;
+            const scale = typeof t?.scale === 'number' ? t.scale : 1;
+            const rotation = typeof t?.rotation === 'number' ? t.rotation : 0;
+            const opacity = typeof t?.opacity === 'number' ? t.opacity : 1;
+
             return (
               <div style={{ fontSize: '12px' }}>
                 <div style={{ marginBottom: '8px' }}>
                   <label style={{ display: 'block', color: '#888', marginBottom: '4px' }}>
-                    Position X: {el.transform.x.toFixed(1)}
+                    Position X: {x.toFixed(1)}
                   </label>
                   <input
                     type="range"
                     min="0"
                     max={project.meta.resolution.width}
-                    value={el.transform.x}
+                    value={x}
                     onChange={(e) => {
                       const newValue = parseFloat(e.target.value);
                       handleTransformChange(selectedElement, 'x', newValue);
@@ -112,13 +120,13 @@ export const TheatrePanel: React.FC<TheatrePanelProps> = ({ project, onUpdate })
 
                 <div style={{ marginBottom: '8px' }}>
                   <label style={{ display: 'block', color: '#888', marginBottom: '4px' }}>
-                    Position Y: {el.transform.y.toFixed(1)}
+                    Position Y: {y.toFixed(1)}
                   </label>
                   <input
                     type="range"
                     min="0"
                     max={project.meta.resolution.height}
-                    value={el.transform.y}
+                    value={y}
                     onChange={(e) => {
                       const newValue = parseFloat(e.target.value);
                       handleTransformChange(selectedElement, 'y', newValue);
@@ -129,14 +137,14 @@ export const TheatrePanel: React.FC<TheatrePanelProps> = ({ project, onUpdate })
 
                 <div style={{ marginBottom: '8px' }}>
                   <label style={{ display: 'block', color: '#888', marginBottom: '4px' }}>
-                    Scale: {el.transform.scale.toFixed(2)}
+                    Scale: {scale.toFixed(2)}
                   </label>
                   <input
                     type="range"
                     min="0.1"
                     max="3"
                     step="0.1"
-                    value={el.transform.scale}
+                    value={scale}
                     onChange={(e) => {
                       const newValue = parseFloat(e.target.value);
                       handleTransformChange(selectedElement, 'scale', newValue);
@@ -147,13 +155,13 @@ export const TheatrePanel: React.FC<TheatrePanelProps> = ({ project, onUpdate })
 
                 <div style={{ marginBottom: '8px' }}>
                   <label style={{ display: 'block', color: '#888', marginBottom: '4px' }}>
-                    Rotation: {el.transform.rotation.toFixed(1)}°
+                    Rotation: {rotation.toFixed(1)}°
                   </label>
                   <input
                     type="range"
                     min="0"
                     max="360"
-                    value={el.transform.rotation}
+                    value={rotation}
                     onChange={(e) => {
                       const newValue = parseFloat(e.target.value);
                       handleTransformChange(selectedElement, 'rotation', newValue);
@@ -164,14 +172,14 @@ export const TheatrePanel: React.FC<TheatrePanelProps> = ({ project, onUpdate })
 
                 <div style={{ marginBottom: '8px' }}>
                   <label style={{ display: 'block', color: '#888', marginBottom: '4px' }}>
-                    Opacity: {(el.transform.opacity * 100).toFixed(0)}%
+                    Opacity: {(opacity * 100).toFixed(0)}%
                   </label>
                   <input
                     type="range"
                     min="0"
                     max="1"
                     step="0.1"
-                    value={el.transform.opacity}
+                    value={opacity}
                     onChange={(e) => {
                       const newValue = parseFloat(e.target.value);
                       handleTransformChange(selectedElement, 'opacity', newValue);
