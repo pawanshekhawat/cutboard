@@ -4,7 +4,6 @@ import { Timeline } from './components/Timeline';
 import { TheatrePanel } from './components/TheatrePanel';
 import { api, type ProjectData } from './lib/api';
 import { 
-  initializeStudioPanel, 
   initializeTheatreSync, 
   syncTheatreFromExternal,
   lockElement,
@@ -20,23 +19,8 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
-  const [externalUpdate, setExternalUpdate] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const theatreInitializedRef = useRef(false);
-  const pendingUpdatesRef = useRef<Array<{ elementId: string; path: string[]; value: any }>>([]);
-
-  // Initialize Theatre.js studio on mount
-  useEffect(() => {
-    initializeStudioPanel();
-  }, []);
-
-  // Sync Theatre.js when project updates externally
-  useEffect(() => {
-    if (externalUpdate && project) {
-      syncTheatreFromExternal(project);
-      setExternalUpdate(false);
-    }
-  }, [externalUpdate, project]);
 
   // Handle Theatre.js updates -> Backend API
   const handleTheatreUpdate = useCallback(async (updates: Array<{ elementId: string; path: string[]; value: any }>) => {
@@ -63,6 +47,7 @@ function App() {
       }
     }
   }, []);
+
   // Load project on mount
   const loadProject = useCallback(async () => {
     try {
@@ -106,7 +91,10 @@ function App() {
       if (data.type === 'update') {
         console.log('Project updated externally, reloading...');
         loadProject();
-        setExternalUpdate(true);
+        // Sync Theatre.js from external change
+        if (project) {
+          syncTheatreFromExternal(project);
+        }
       }
     };
 
@@ -121,7 +109,7 @@ function App() {
         eventSourceRef.current.close();
       }
     };
-  }, [loadProject]);
+  }, [loadProject, project]);
 
   // Playback loop
   useEffect(() => {

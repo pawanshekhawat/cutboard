@@ -1,7 +1,7 @@
-import { studio, getProject, type ISheet } from '@theatre/studio';
+import Theatre, { getProject } from '@theatre/studio';
 import type { ProjectData } from './api';
 
-// Studio is already initialized in main.tsx
+// Theatre.js v0.7+ auto-initializes on import
 const THEATRE_PROJECT = getProject('CutBoard');
 
 // Track which elements are being edited to prevent sync loops
@@ -149,8 +149,22 @@ export function getTheatreProject() {
 }
 
 /**
- * Initialize Theatre.js studio panel (call once on app mount)
+ * Hide Theatre.js studio panel (call to hide the studio UI)
  */
-export function initializeStudioPanel() {
-  studio.initialize();
+export function hideStudioPanel() {
+  Theatre.ui.hide();
+}
+
+/**
+ * Show Theatre.js studio panel
+ */
+export function showStudioPanel() {
+  Theatre.ui.restore();
+}
+
+/**
+ * Check if studio panel is hidden
+ */
+export function isStudioPanelHidden(): boolean {
+  return Theatre.ui.isHidden;
 }
