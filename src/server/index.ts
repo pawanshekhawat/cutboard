@@ -39,7 +39,7 @@ server.get('/', async () => {
 });
 
 // SSE stream for real-time updates
-server.get('/api/stream', { raw: true }, (req, reply) => {
+server.get('/api/stream', (req, reply) => {
   reply.headers({
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',

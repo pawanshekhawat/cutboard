@@ -11,7 +11,7 @@ function App() {
   const [project, setProject] = useState<ProjectData | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
+  const [, setIsConnected] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 

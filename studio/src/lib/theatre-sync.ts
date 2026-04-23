@@ -10,7 +10,6 @@
  * Theatre.js integration will be revisited when the API is more stable.
  */
 
-import type { ProjectData } from './api';
 
 // Lock mechanism to prevent sync loops during editing
 const editingLocks = new Map<string, Set<string>>();
@@ -18,18 +17,14 @@ const editingLocks = new Map<string, Set<string>>();
 /**
  * Initialize sync (no-op in API mode - TheatrePanel handles updates directly)
  */
-export function initializeTheatreSync(
-  project: ProjectData,
-  onUpdate: (elementId: string, path: string[], value: any) => void,
-  onBulkUpdate: (updates: Array<{ elementId: string; path: string[]; value: any }>) => void
-) {
+export function initializeTheatreSync() {
   console.log('CutBoard sync initialized (API mode)');
 }
 
 /**
  * Stub for external sync (would be used for SSE updates)
  */
-export function syncTheatreFromExternal(project: ProjectData) {
+export function syncTheatreFromExternal() {
   // SSE handles this via loadProject() in App.tsx
 }
 
