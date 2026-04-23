@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import { getProject } from '@theatre/studio';
 import { api, type ProjectData } from '../lib/api';
 
 interface TheatrePanelProps {
@@ -31,9 +30,6 @@ export const TheatrePanel: React.FC<TheatrePanelProps> = ({ project, onUpdate })
   useEffect(() => {
     if (!project) return;
 
-    // Get Theatre.js project
-    const theatreProject = getProject('CutBoard');
-    
     // Auto-select first element if none selected
     const elementIds = Object.keys(project.elements);
     if (elementIds.length > 0 && !selectedElement) {

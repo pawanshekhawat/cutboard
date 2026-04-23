@@ -27,10 +27,6 @@
       "trimStart": 0,
       "trimDuration": 5,
       "transform": {
-        "x": 0,
-        "y": 0,
-        "scale": 1,
-        "rotation": 0,
         "opacity": 1
       }
     },
@@ -45,10 +41,6 @@
       "start": 0,
       "duration": 5,
       "transform": {
-        "x": 0,
-        "y": 0,
-        "scale": 1,
-        "rotation": 0,
         "opacity": 1
       }
     }

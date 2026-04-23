@@ -1,13 +1,13 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import Theatre from '@theatre/studio'
+import '@theatre/core'; // Must be imported first to register core with studio
+import Theatre from '@theatre/studio'; // Studio auto-initializes after core is registered
 import './index.css'
 import App from './App.tsx'
 
-// Theatre.js v0.7+ auto-initializes on import
-// The studio UI is controlled via Theatre.ui.hide()/restore()
-// If you want to hide the studio panel by default, uncomment:
-// Theatre.ui.hide()
+// Theatre.js v0.6+ requires core to be imported first
+// Studio auto-initializes when imported after core
+// Use Theatre.ui.hide() if you want to hide the studio panel
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
