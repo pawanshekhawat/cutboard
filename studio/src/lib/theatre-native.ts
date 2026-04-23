@@ -10,11 +10,15 @@ const PROJECT_PATH = 'D:\\Coding\\Projects\\cutboard\\project.json';
 type TheatreObjectValues = {
   transform: { x: number; y: number; scale: number; rotation: number; opacity: number };
 };
+type TheatreAudioValues = {
+  volume: number;
+  start: number;
+};
 
 type ElementRuntime = {
-  object: ISheetObject<TheatreObjectValues>;
+  object: ISheetObject<any>;
+  elementType: ProjectData['elements'][string]['type'];
   unsubscribeValues: () => void;
-  lastSent?: { x: number; y: number; scale: number; rotation: number; opacity: number; at: number };
 };
 
 type Runtime = {
@@ -79,24 +83,37 @@ export async function initializeTheatreNative(
   // Create objects for each element.
   for (const el of Object.values(projectJson.elements)) {
     const transform = normalizeTransform(el.transform);
-    const obj = sheet.object(el.id, {
-      transform: {
-        x: transform.x,
-        y: transform.y,
-        scale: transform.scale,
-        rotation: transform.rotation,
-        opacity: transform.opacity,
-      },
-    });
+    const obj =
+      el.type === 'audio'
+        ? sheet.object(el.id, {
+            volume: typeof (el as any).volume === 'number' ? (el as any).volume : 1,
+            start: typeof el.start === 'number' ? el.start : 0,
+          })
+        : sheet.object(el.id, {
+            transform: {
+              x: transform.x,
+              y: transform.y,
+              scale: transform.scale,
+              rotation: transform.rotation,
+              opacity: transform.opacity,
+            },
+          });
 
-    // Keep default values synced from JSON when not actively editing that prop.
-    obj.initialValue = { transform };
+    // Keep default values synced from JSON when not actively editing.
+    if (el.type === 'audio') {
+      (obj as ISheetObject<TheatreAudioValues>).initialValue = {
+        volume: typeof (el as any).volume === 'number' ? (el as any).volume : 1,
+        start: typeof el.start === 'number' ? el.start : 0,
+      };
+    } else {
+      (obj as ISheetObject<TheatreObjectValues>).initialValue = { transform };
+    }
 
     const unsubscribeValues = obj.onValuesChange((newValues) => {
-      opts.onValues?.(el.id, newValues as TheatreObjectValues);
+      opts.onValues?.(el.id, newValues as any);
     });
 
-    elements.set(el.id, { object: obj, unsubscribeValues });
+    elements.set(el.id, { object: obj, elementType: el.type, unsubscribeValues });
   }
 
   // Seed keyframes from project.json animations into Theatre.
@@ -138,11 +155,11 @@ export function getTheatreSheet(): ISheet | null {
 
 export function subscribeToTheatreElementValues(
   elementId: string,
-  cb: (values: TheatreObjectValues) => void
+  cb: (values: any) => void
 ): (() => void) | null {
   const r = runtime?.elements.get(elementId);
   if (!r) return null;
-  return r.object.onValuesChange((v) => cb(v as TheatreObjectValues));
+  return r.object.onValuesChange((v) => cb(v));
 }
 
 export function getTheatreElementTransform(elementId: string) {
@@ -161,6 +178,16 @@ export function applyExternalProjectToTheatre(projectJson: ProjectData) {
   for (const el of Object.values(projectJson.elements)) {
     const r = runtime.elements.get(el.id);
     if (!r) continue;
+    if (el.type === 'audio') {
+      const volumeLocked = isElementLocked(el.id, 'volume');
+      const startLocked = isElementLocked(el.id, 'start');
+      if (volumeLocked || startLocked) continue;
+      r.object.initialValue = {
+        volume: typeof (el as any).volume === 'number' ? (el as any).volume : 1,
+        start: typeof el.start === 'number' ? el.start : 0,
+      };
+      continue;
+    }
     const t = normalizeTransform(el.transform);
 
     // If any transform prop is locked, skip applying to avoid interrupting drags.
@@ -200,6 +227,7 @@ export function enableTheatreWriteBack() {
 
   for (const [elementId, r] of elements.entries()) {
     const obj = r.object;
+    const elementType = r.elementType;
 
     const sendTransformPatch = async (patch: Partial<TheatreObjectValues['transform']>) => {
       const keys = Object.keys(patch);
@@ -215,6 +243,17 @@ export function enableTheatreWriteBack() {
         } as any);
       } finally {
         for (const k of keys) unlockElement(elementId, `transform.${k}`);
+      }
+    };
+
+    const sendAudioPatch = async (patch: { volume?: number; start?: number }) => {
+      const keys = Object.keys(patch);
+      if (keys.length === 0) return;
+      for (const k of keys) lockElement(elementId, k);
+      try {
+        await api.updateElement(PROJECT_PATH, elementId, patch as any);
+      } finally {
+        for (const k of keys) unlockElement(elementId, k);
       }
     };
 
@@ -268,14 +307,46 @@ export function enableTheatreWriteBack() {
       });
     };
 
-    // Subscribe to each transform prop pointer
-    const unsubs = [
-      handleProp('x'),
-      handleProp('y'),
-      handleProp('scale'),
-      handleProp('rotation'),
-      handleProp('opacity'),
-    ];
+    const handleAudioProp = (prop: 'volume' | 'start') => {
+      const pointer = (obj as any).props[prop];
+      return onChange(pointer, (raw) => {
+        const value = typeof raw === 'number' ? raw : Number(raw);
+        if (!Number.isFinite(value)) return;
+        void (async () => {
+          if (isElementLocked(elementId, prop)) return;
+          const position = sheet.sequence.position;
+          const keyframes = (sheet.sequence as any).__experimental_getKeyframes?.(pointer) as
+            | Array<{ position: number; value: number }>
+            | undefined;
+          if (!keyframes || keyframes.length === 0) {
+            await sendAudioPatch({ [prop]: value } as any);
+            return;
+          }
+          const sorted = [...keyframes].sort((a, b) => a.position - b.position);
+          const idx = sorted.findIndex((k) => approxEq(k.position, position));
+          if (idx >= 0) {
+            lockElement(elementId, prop);
+            try {
+              await api.updateKeyframe(PROJECT_PATH, elementId, prop, idx, value, { time: position });
+            } finally {
+              unlockElement(elementId, prop);
+            }
+          } else {
+            lockElement(elementId, prop);
+            try {
+              await api.addKeyframe(PROJECT_PATH, elementId, prop, position, value);
+            } finally {
+              unlockElement(elementId, prop);
+            }
+          }
+        })();
+      });
+    };
+
+    const unsubs =
+      elementType === 'audio'
+        ? [handleAudioProp('volume'), handleAudioProp('start')]
+        : [handleProp('x'), handleProp('y'), handleProp('scale'), handleProp('rotation'), handleProp('opacity')];
 
     const prevUnsub = r.unsubscribeValues;
     r.unsubscribeValues = () => {

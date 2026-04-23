@@ -16,6 +16,7 @@ function App() {
   const [project, setProject] = useState<ProjectData | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isProxyMode, setIsProxyMode] = useState(false);
   const [, setIsConnected] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -138,6 +139,23 @@ function App() {
       }}>
         <h1 style={{ margin: 0, fontSize: '24px' }}>🎬 CutBoard Studio</h1>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: '13px',
+            color: '#ddd',
+            backgroundColor: '#2a2a2a',
+            padding: '6px 10px',
+            borderRadius: '6px'
+          }}>
+            <input
+              type="checkbox"
+              checked={isProxyMode}
+              onChange={(e) => setIsProxyMode(e.target.checked)}
+            />
+            Proxy Mode
+          </label>
           <span style={{
             fontSize: '14px',
             color: sseConnected ? '#2ecc71' : '#e74c3c'
@@ -164,11 +182,17 @@ function App() {
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        padding: '40px',
+        justifyContent: 'center',
+        padding: '20px 40px 160px',
         backgroundColor: '#0f0f0f',
-        minHeight: 'calc(100vh - 140px)'
+        minHeight: 'calc(100vh - 80px)',
+        boxSizing: 'border-box'
       }}>
-        <Canvas project={project} currentTime={currentTime} />
+        <Canvas
+          project={project}
+          currentTime={currentTime}
+          isProxyMode={isProxyMode}
+        />
       </main>
 
       <footer style={{ position: 'fixed', bottom: 0, left: 0, right: 0 }}>

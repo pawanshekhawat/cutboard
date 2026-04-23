@@ -1,7 +1,7 @@
 import { execSync } from 'child_process';
 import { resolve, dirname } from 'path';
 import { mkdirSync } from 'fs';
-import type { Project, VideoElement, TextElement, Animation, Keyframe } from '../types/schema.js';
+import type { Project, VideoElement, TextElement, Animation, Keyframe, AudioElement } from '../types/schema.js';
 import ffmpegStatic from 'ffmpeg-static';
 import * as ffprobe from 'ffprobe-static';
 
@@ -73,6 +73,7 @@ export function probeAsset(src: string): { duration: number; width: number; heig
 
 // ─── Timeline map ───────────────────────────────────────────────────────────
 type TLEntry = { id: string; src: string; start: number; end: number; trimStart: number };
+type AudioTLEntry = { id: string; src: string; start: number; duration: number; trimStart: number; volume: number };
 
 function buildTimeline(project: Project): TLEntry[] {
   const entries: TLEntry[] = [];
@@ -86,6 +87,42 @@ function buildTimeline(project: Project): TLEntry[] {
   return entries.sort((a, b) => a.start - b.start);
 }
 
+function buildAudioTimeline(project: Project): AudioTLEntry[] {
+  const entries: AudioTLEntry[] = [];
+  for (const [id, el] of Object.entries(project.elements)) {
+    if (el.type !== 'audio') continue;
+    const asset = project.assets[el.assetId];
+    if (!asset || asset.type !== 'audio') continue;
+    const ael = el as AudioElement;
+    entries.push({
+      id,
+      src: (asset as any).src,
+      start: el.start,
+      duration: el.duration,
+      trimStart: ael.trimStart ?? 0,
+      volume: ael.volume ?? 1,
+    });
+  }
+  return entries.sort((a, b) => a.start - b.start);
+}
+
+function getVideoEffectsFilter(project: Project, elementId: string): string {
+  const effects = Object.values(project.effects || {}).filter(fx => fx.target === elementId);
+  if (effects.length === 0) return '';
+
+  const chain: string[] = [];
+  for (const fx of effects) {
+    if (fx.type === 'blur') {
+      const radius = Math.max(0, Math.min(50, Number(fx.value) || 0));
+      chain.push(`boxblur=luma_radius=${radius}:luma_power=1`);
+    } else if (fx.type === 'grayscale') {
+      // grayscale intensity is binary for now (value > 0 enables it)
+      if ((Number(fx.value) || 0) > 0) chain.push('hue=s=0');
+    }
+  }
+  return chain.length > 0 ? `,${chain.join(',')}` : '';
+}
+
 // ─── Render ────────────────────────────────────────────────────────────────
 // root = project root directory (where project.json lives), needed to resolve asset paths
 export function render(project: Project, outputPath = './output/render.mp4', root = '.'): void {
@@ -97,6 +134,7 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
 
   const textEls = Object.values(elements).filter(el => el.type === 'text') as TextElement[];
   const timeline = buildTimeline(project);
+  const audioTimeline = buildAudioTimeline(project);
 
   // ── No video → text-over-testsrc (proven path) ────────────────────────
   if (timeline.length === 0) {
@@ -108,10 +146,24 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
         return `drawtext=text='${e}':fontsize=${el.style.fontSize}:fontcolor=${el.style.color}:x=${xExpr}:y=${yExpr}:` +
           `enable='between(t,${el.start},${el.start + el.duration})'`;
       });
+      if (audioTimeline.length === 0) {
+        const cmd = [
+          `"${FFMPEG}"`, '-y',
+          '-f', 'lavfi', '-i', `testsrc=d=${dur}:size=${meta.resolution.width}x${meta.resolution.height}:rate=${meta.fps}`,
+          '-vf', parts.join(','),
+          '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+          '-t', String(dur), '-pix_fmt', 'yuv420p',
+          `"${absOutput}"`,
+        ].join(' ');
+        execSync(cmd, { stdio: 'inherit' });
+        console.log(`✓ Saved: ${absOutput}`);
+        return;
+      }
+    }
+    if (audioTimeline.length === 0) {
       const cmd = [
         `"${FFMPEG}"`, '-y',
-        '-f', 'lavfi', '-i', `testsrc=d=${dur}:size=${meta.resolution.width}x${meta.resolution.height}:rate=${meta.fps}`,
-        '-vf', parts.join(','),
+        '-f', 'lavfi', '-i', `color=c=black:s=${meta.resolution.width}x${meta.resolution.height}:d=${dur}`,
         '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
         '-t', String(dur), '-pix_fmt', 'yuv420p',
         `"${absOutput}"`,
@@ -120,16 +172,6 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
       console.log(`✓ Saved: ${absOutput}`);
       return;
     }
-    const cmd = [
-      `"${FFMPEG}"`, '-y',
-      '-f', 'lavfi', '-i', `color=c=black:s=${meta.resolution.width}x${meta.resolution.height}:d=${dur}`,
-      '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
-      '-t', String(dur), '-pix_fmt', 'yuv420p',
-      `"${absOutput}"`,
-    ].join(' ');
-    execSync(cmd, { stdio: 'inherit' });
-    console.log(`✓ Saved: ${absOutput}`);
-    return;
   }
 
   // ── Video clips + optional text ───────────────────────────────────────
@@ -138,6 +180,9 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
   const assetIdx = new Map<string, number>();
   for (const e of timeline) {
     if (!assetIdx.has(e.src)) { assetIdx.set(e.src, assetList.length); assetList.push(e.src); }
+  }
+  for (const a of audioTimeline) {
+    if (!assetIdx.has(a.src)) { assetIdx.set(a.src, assetList.length); assetList.push(a.src); }
   }
 
   // Build filter_complex
@@ -151,9 +196,10 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
     const e = timeline[i];
     const ii = assetIdx.get(e.src)!;
     const clipDur = e.end - e.start;
+    const fx = getVideoEffectsFilter(project, e.id);
     fl.push(
       `[${ii}:v]trim=start=${e.trimStart}:duration=${clipDur},setpts=PTS-STARTPTS+${e.start}/TB,` +
-      `scale=${meta.resolution.width}:${meta.resolution.height}:force_original_aspect_ratio=decrease,setsar=1[v${i}]`
+      `scale=${meta.resolution.width}:${meta.resolution.height}:force_original_aspect_ratio=decrease,setsar=1${fx}[v${i}]`
     );
   }
 
@@ -167,7 +213,7 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
   }
 
   // Text overlays on top (with animation support)
-  let top = '[vout]';
+  let top = timeline.length > 0 ? '[vout]' : '[base]';
   for (let i = 0; i < textEls.length; i++) {
     const el = textEls[i];
     const e = el.content.replace(/'/g, "'\\''").replace(/:/g, '\\:').replace(/\n/g, '\\n');
@@ -181,21 +227,44 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
     fl.push(`${top}drawtext=text='${e}':fontsize=${el.style.fontSize}:fontcolor=${el.style.color}:x=${xExpr}:y=${yExpr}:${en}${nxt}`);
     top = nxt;
   }
+  if (textEls.length === 0) {
+    fl.push(`${top}null[out]`);
+  }
+
+  // Audio chain: atrim + adelay + volume per clip, then amix
+  const audioLabels: string[] = [];
+  for (let i = 0; i < audioTimeline.length; i++) {
+    const a = audioTimeline[i];
+    const ii = assetIdx.get(a.src)!;
+    const delayMs = Math.max(0, Math.round(a.start * 1000));
+    const out = `[a${i}]`;
+    fl.push(
+      `[${ii}:a]atrim=start=${a.trimStart}:duration=${a.duration},asetpts=PTS-STARTPTS,` +
+      `adelay=${delayMs}|${delayMs},volume=${a.volume}${out}`
+    );
+    audioLabels.push(out);
+  }
+  if (audioLabels.length > 0) {
+    fl.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0[aout]`);
+  }
 
   const fc = fl.join('; ');
 
   // Build arg list (no shell splitting — each path is a separate quoted arg)
   const args: string[] = ['-y'];
   for (const s of assetList) args.push('-i', resolve(root, s) as string);
-  args.push('-filter_complex', fc, '-map', '[out]',
+  args.push('-filter_complex', fc, '-map', '[out]');
+  if (audioLabels.length > 0) args.push('-map', '[aout]');
+  args.push(
     '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+    ...(audioLabels.length > 0 ? ['-c:a', 'aac', '-b:a', '192k'] : ['-an']),
     '-t', String(dur), '-pix_fmt', 'yuv420p', absOutput);
 
   // Quote each arg individually to prevent shell splitting of paths with spaces
   const quotedArgs = args.map(a => `"${a}"`);
   const cmd = `"${FFMPEG}" ${quotedArgs.join(' ')}`;
 
-  console.log(`▶ rendering ${timeline.length} clip(s) + ${textEls.length} text layer(s)...`);
+  console.log(`▶ rendering ${timeline.length} video clip(s) + ${textEls.length} text layer(s) + ${audioTimeline.length} audio clip(s)...`);
   execSync(cmd, { stdio: 'inherit' });
   console.log(`✓ Saved: ${absOutput}`);
 }

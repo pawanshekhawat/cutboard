@@ -32,9 +32,12 @@ export interface AddTextOpts {
 }
 
 export interface AddAudioOpts {
+  id?: string;
   assetId: string;
   start: number;
   duration: number;
+  trimStart?: number;
+  volume?: number;
 }
 
 export interface SetKeyframeOpts {
@@ -122,13 +125,15 @@ function createAPI(project: Project, _root: string): ProjectAPI {
     },
 
     addAudio(opts: AddAudioOpts): string {
-      const id = `el_audio_${randomId(6)}`;
+      const id = opts.id ?? `el_audio_${randomId(6)}`;
       const el: AudioElement = {
         id,
         type: 'audio',
         assetId: opts.assetId,
         start: opts.start,
         duration: opts.duration,
+        trimStart: opts.trimStart ?? 0,
+        volume: opts.volume ?? 1,
         transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
       };
       project.elements[id] = el;

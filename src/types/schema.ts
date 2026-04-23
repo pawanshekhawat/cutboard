@@ -81,6 +81,8 @@ export interface TextElement extends BaseElement {
 export interface AudioElement extends BaseElement {
   type: 'audio';
   assetId: string;
+  trimStart?: number; // seconds — seek into source audio
+  volume?: number; // gain multiplier (1 = original)
 }
 
 export interface TextStyle {

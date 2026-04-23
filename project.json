@@ -7,13 +7,17 @@
       "width": 1920,
       "height": 1080
     },
-    "duration": 5
+    "duration": 12
   },
   "assets": {
     "assets/sample-10s.mp4": {
       "type": "video",
       "src": "assets/sample-10s.mp4",
       "duration": 0
+    },
+    "assets/bgm.mp3": {
+      "type": "audio",
+      "src": "assets/bgm.mp3"
     }
   },
   "tracks": [],
@@ -27,11 +31,11 @@
       "trimStart": 0,
       "trimDuration": 5,
       "transform": {
-        "opacity": 1,
+        "x": 525,
+        "y": 525,
+        "scale": 0.5,
         "rotation": 0,
-        "x": 845,
-        "y": 331,
-        "scale": 0.5
+        "opacity": 100
       }
     },
     "el_text_2513b9": {
@@ -45,10 +49,27 @@
       "start": 0,
       "duration": 5,
       "transform": {
-        "opacity": 1,
         "x": 500,
-        "y": 190,
-        "scale": 0.6
+        "y": 300,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      }
+    },
+    "el_audio_bgm": {
+      "id": "el_audio_bgm",
+      "type": "audio",
+      "assetId": "assets/bgm.mp3",
+      "start": 0,
+      "duration": 12,
+      "trimStart": 0,
+      "volume": 104.35,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
       }
     }
   },
@@ -102,5 +123,18 @@
       "easing": "easeInOut"
     }
   },
-  "effects": {}
+  "effects": {
+    "fx_blur_sanity": {
+      "id": "fx_blur_sanity",
+      "target": "el_video_3580ea",
+      "type": "blur",
+      "value": 10
+    },
+    "fx_gray_sanity": {
+      "id": "fx_gray_sanity",
+      "target": "el_video_3580ea",
+      "type": "grayscale",
+      "value": 1
+    }
+  }
 }
