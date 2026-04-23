@@ -1,111 +1,38 @@
-import Theatre, { getProject } from '@theatre/studio';
+/**
+ * CutBoard Theatre.js Sync Module
+ * 
+ * NOTE: Theatre.js v0.7+ has a different API structure and auto-initializes on import.
+ * The studio UI shows automatically. For now, we use direct API calls in TheatrePanel
+ * for the two-way sync, which bypasses Theatre.js internals.
+ * 
+ * This allows the user to test transform sliders immediately.
+ */
+
 import type { ProjectData } from './api';
 
-// Theatre.js v0.7+ auto-initializes on import
-const THEATRE_PROJECT = getProject('CutBoard');
-
-// Track which elements are being edited to prevent sync loops
+// Lock mechanism to prevent sync loops during editing
 const editingLocks = new Map<string, Set<string>>();
 
-export interface TheatreElement {
-  transform: {
-    x: number;
-    y: number;
-    scale: number;
-    rotation: number;
-    opacity: number;
-  };
-}
-
 /**
- * Initialize Theatre.js studio and sync with project.json
+ * Initialize Theatre.js sync with project.json
+ * Currently simplified - TheatrePanel uses direct API calls
  */
 export function initializeTheatreSync(
   project: ProjectData,
   onUpdate: (elementId: string, path: string[], value: any) => void,
   onBulkUpdate: (updates: Array<{ elementId: string; path: string[]; value: any }>) => void
 ) {
-  // Clear existing sheets
-  THEATRE_PROJECT.sheets = {};
-
-  // Create a sheet for each element
-  Object.entries(project.elements).forEach(([elementId, element]) => {
-    const sheet = THEATRE_PROJECT.sheet(elementId, 'Element');
-    
-    // Create Theatre.js object for this element
-    const obj = sheet.object(elementId, {
-      transform: {
-        x: element.transform.x,
-        y: element.transform.y,
-        scale: element.transform.scale,
-        rotation: element.transform.rotation,
-        opacity: element.transform.opacity,
-      }
-    });
-
-    // Subscribe to changes
-    obj.onValuesChange((values) => {
-      // Check if we're currently editing this element (prevent loop)
-      if (isElementLocked(elementId)) {
-        return;
-      }
-
-      const updates: Array<{ elementId: string; path: string[]; value: any }> = [];
-
-      if (values.transform) {
-        const transform = values.transform as TheatreElement['transform'];
-        
-        if (transform.x !== undefined) {
-          updates.push({ elementId, path: ['transform', 'x'], value: transform.x });
-        }
-        if (transform.y !== undefined) {
-          updates.push({ elementId, path: ['transform', 'y'], value: transform.y });
-        }
-        if (transform.scale !== undefined) {
-          updates.push({ elementId, path: ['transform', 'scale'], value: transform.scale });
-        }
-        if (transform.rotation !== undefined) {
-          updates.push({ elementId, path: ['transform', 'rotation'], value: transform.rotation });
-        }
-        if (transform.opacity !== undefined) {
-          updates.push({ elementId, path: ['transform', 'opacity'], value: transform.opacity });
-        }
-      }
-
-      if (updates.length > 0) {
-        onBulkUpdate(updates);
-      }
-    });
-  });
-
-  return THEATRE_PROJECT;
+  console.log('Theatre.js sync initialized (API mode)');
+  // In this simplified mode, TheatrePanel handles updates via direct API calls
+  // Theatre.js integration will be enhanced in future iterations
 }
 
 /**
- * Update Theatre.js object values from external changes (SSE)
- * Respects editing locks to prevent overwriting user edits
+ * Update Theatre.js from external project changes
  */
 export function syncTheatreFromExternal(project: ProjectData) {
-  Object.entries(project.elements).forEach(([elementId, element]) => {
-    // Skip if user is actively editing this element
-    if (isElementLocked(elementId)) {
-      return;
-    }
-
-    const sheet = THEATRE_PROJECT.sheet(elementId, 'Element');
-    const obj = sheet.object(elementId);
-
-    // Update transform values
-    obj.replaceProps({
-      transform: {
-        x: element.transform.x,
-        y: element.transform.y,
-        scale: element.transform.scale,
-        rotation: element.transform.rotation,
-        opacity: element.transform.opacity,
-      }
-    });
-  });
+  // External sync handled via SSE in App.tsx
+  console.log('External sync triggered (handled via SSE)');
 }
 
 /**
@@ -142,29 +69,31 @@ export function isElementLocked(elementId: string, property?: string): boolean {
 }
 
 /**
- * Get Theatre.js project for manual access
+ * Stub for Theatre.js project (not used in current simplified mode)
  */
 export function getTheatreProject() {
-  return THEATRE_PROJECT;
+  return null;
 }
 
 /**
- * Hide Theatre.js studio panel (call to hide the studio UI)
+ * Hide Theatre.js studio panel (if visible)
  */
 export function hideStudioPanel() {
-  Theatre.ui.hide();
+  // Theatre.js v0.7 shows automatically on import
+  // This is a placeholder for future implementation
+  console.log('Studio panel visibility control not yet implemented');
 }
 
 /**
  * Show Theatre.js studio panel
  */
 export function showStudioPanel() {
-  Theatre.ui.restore();
+  console.log('Studio panel visibility control not yet implemented');
 }
 
 /**
  * Check if studio panel is hidden
  */
 export function isStudioPanelHidden(): boolean {
-  return Theatre.ui.isHidden;
+  return false;
 }
