@@ -3,12 +3,6 @@ import { Canvas } from './components/Canvas';
 import { Timeline } from './components/Timeline';
 import { TheatrePanel } from './components/TheatrePanel';
 import { api, type ProjectData } from './lib/api';
-import { 
-  initializeTheatreSync, 
-  syncTheatreFromExternal,
-  lockElement,
-  unlockElement
-} from './lib/theatre-sync';
 import './App.css';
 
 const PROJECT_PATH = 'D:\\Coding\\Projects\\cutboard\\project.json';
@@ -20,56 +14,18 @@ function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
-  const theatreInitializedRef = useRef(false);
 
-  // Handle Theatre.js updates -> Backend API
-  const handleTheatreUpdate = useCallback(async (updates: Array<{ elementId: string; path: string[]; value: any }>) => {
-    console.log('Theatre.js update:', updates);
-    
-    for (const update of updates) {
-      const { elementId, path, value } = update;
-      
-      // Lock the element to prevent sync loop
-      lockElement(elementId, path.join('.'));
-      
-      try {
-        // Send update to backend
-        await api.updateElement(PROJECT_PATH, elementId, {
-          [path[0]]: path.length === 2 ? { [path[1]]: value } : value
-        });
-      } catch (error) {
-        console.error('Failed to update element:', error);
-      } finally {
-        // Unlock after a short delay to allow for continuous editing
-        setTimeout(() => {
-          unlockElement(elementId, path.join('.'));
-        }, 100);
-      }
-    }
-  }, []);
-
-  // Load project on mount
+  // Load project
   const loadProject = useCallback(async () => {
     try {
       const data = await api.getProject(PROJECT_PATH);
       setProject(data);
       setIsConnected(true);
-      
-      // Initialize Theatre.js sync after first load
-      if (!theatreInitializedRef.current && data) {
-        initializeTheatreSync(data, 
-          (elementId, path, value) => {
-            handleTheatreUpdate([{ elementId, path, value }]);
-          },
-          handleTheatreUpdate
-        );
-        theatreInitializedRef.current = true;
-      }
     } catch (error) {
       console.error('Failed to load project:', error);
       setIsConnected(false);
     }
-  }, [handleTheatreUpdate]);
+  }, []);
 
   // Initial load
   useEffect(() => {
@@ -91,10 +47,6 @@ function App() {
       if (data.type === 'update') {
         console.log('Project updated externally, reloading...');
         loadProject();
-        // Sync Theatre.js from external change
-        if (project) {
-          syncTheatreFromExternal(project);
-        }
       }
     };
 
@@ -109,7 +61,7 @@ function App() {
         eventSourceRef.current.close();
       }
     };
-  }, [loadProject, project]);
+  }, [loadProject]);
 
   // Playback loop
   useEffect(() => {
@@ -193,7 +145,7 @@ function App() {
         />
       </footer>
 
-      {/* Theatre.js Panel */}
+      {/* Theatre Panel - API Mode */}
       {project && (
         <div style={{
           position: 'fixed',
