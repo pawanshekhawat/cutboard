@@ -1,0 +1,122 @@
+{
+  "version": "1.0",
+  "meta": {
+    "name": "My First Cutboard",
+    "fps": 30,
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 7
+  },
+  "assets": {
+    "vid_clip1": {
+      "type": "video",
+      "src": "./assets/clip.mp4",
+      "duration": 9.045313
+    }
+  },
+  "tracks": [
+    {
+      "id": "track_video_main",
+      "type": "video",
+      "elements": [
+        "el_video_1ff401",
+        "el_video_32d980"
+      ]
+    },
+    {
+      "id": "track_text_top",
+      "type": "text",
+      "elements": [
+        "el_txt_hello"
+      ]
+    }
+  ],
+  "elements": {
+    "el_txt_hello": {
+      "id": "el_txt_hello",
+      "type": "text",
+      "content": "Hello CutBoard",
+      "style": {
+        "fontSize": 64,
+        "color": "#ffffff"
+      },
+      "start": 1,
+      "duration": 4,
+      "transform": {
+        "x": 80,
+        "y": 500,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      }
+    },
+    "el_video_a3f43b": {
+      "id": "el_video_a3f43b",
+      "type": "video",
+      "assetId": "vid_clip1",
+      "start": 0,
+      "duration": 5,
+      "trimStart": 2,
+      "trimDuration": 5,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      }
+    },
+    "el_video_42c4ef": {
+      "id": "el_video_42c4ef",
+      "type": "video",
+      "assetId": "vid_clip1",
+      "start": 4,
+      "duration": 3,
+      "trimStart": 5,
+      "trimDuration": 3,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      }
+    },
+    "el_video_1ff401": {
+      "id": "el_video_1ff401",
+      "type": "video",
+      "assetId": "vid_clip1",
+      "start": 0,
+      "duration": 5,
+      "trimStart": 2,
+      "trimDuration": 5,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      }
+    },
+    "el_video_32d980": {
+      "id": "el_video_32d980",
+      "type": "video",
+      "assetId": "vid_clip1",
+      "start": 4,
+      "duration": 3,
+      "trimStart": 5,
+      "trimDuration": 3,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      }
+    }
+  },
+  "animations": {},
+  "effects": {}
+}

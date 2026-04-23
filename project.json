@@ -1,0 +1,107 @@
+{
+  "version": "1.0",
+  "meta": {
+    "name": "Animation Test",
+    "fps": 30,
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 5
+  },
+  "assets": {
+    "assets/sample-10s.mp4": {
+      "type": "video",
+      "src": "assets/sample-10s.mp4",
+      "duration": 0
+    }
+  },
+  "tracks": [],
+  "elements": {
+    "el_video_3580ea": {
+      "id": "el_video_3580ea",
+      "type": "video",
+      "assetId": "assets/sample-10s.mp4",
+      "start": 0,
+      "duration": 5,
+      "trimStart": 0,
+      "trimDuration": 5,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      }
+    },
+    "el_text_2513b9": {
+      "id": "el_text_2513b9",
+      "type": "text",
+      "content": "Animation Test: Sliding Text!",
+      "style": {
+        "fontSize": 48,
+        "color": "#00ff00"
+      },
+      "start": 0,
+      "duration": 5,
+      "transform": {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "rotation": 0,
+        "opacity": 1
+      }
+    }
+  },
+  "animations": {
+    "anim_82abe1": {
+      "id": "anim_82abe1",
+      "target": "el_text_2513b9",
+      "property": "transform.x",
+      "keyframes": [
+        {
+          "time": 0,
+          "value": 0
+        }
+      ],
+      "easing": "easeInOut"
+    },
+    "anim_51258c": {
+      "id": "anim_51258c",
+      "target": "el_text_2513b9",
+      "property": "transform.x",
+      "keyframes": [
+        {
+          "time": 3,
+          "value": 500
+        }
+      ],
+      "easing": "easeInOut"
+    },
+    "anim_e480f2": {
+      "id": "anim_e480f2",
+      "target": "el_text_2513b9",
+      "property": "transform.y",
+      "keyframes": [
+        {
+          "time": 0,
+          "value": 100
+        }
+      ],
+      "easing": "easeInOut"
+    },
+    "anim_4271bd": {
+      "id": "anim_4271bd",
+      "target": "el_text_2513b9",
+      "property": "transform.y",
+      "keyframes": [
+        {
+          "time": 3,
+          "value": 300
+        }
+      ],
+      "easing": "easeInOut"
+    }
+  },
+  "effects": {}
+}
