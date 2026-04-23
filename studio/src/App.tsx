@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Canvas } from './components/Canvas';
 import { Timeline } from './components/Timeline';
-import { TheatrePanel } from './components/TheatrePanel';
 import { api, type ProjectData } from './lib/api';
+import {
+  applyExternalProjectToTheatre,
+  enableTheatreWriteBack,
+  initializeTheatreNative,
+  setTheatreTime,
+} from './lib/theatre-native';
 import './App.css';
 
 const PROJECT_PATH = 'D:\\Coding\\Projects\\cutboard\\project.json';
@@ -14,6 +19,9 @@ function App() {
   const [, setIsConnected] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const didInitRef = useRef(false);
+  const didSseRef = useRef(false);
+  const theatreSeededRef = useRef(false);
 
   // Load project
   const loadProject = useCallback(async () => {
@@ -29,11 +37,31 @@ function App() {
 
   // Initial load
   useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
     loadProject();
   }, [loadProject]);
 
+  // Initialize Theatre from project.json
+  useEffect(() => {
+    if (!project) return;
+    if (theatreSeededRef.current) return;
+    theatreSeededRef.current = true;
+    (async () => {
+      await initializeTheatreNative(project, {
+        onSequencePosition: (t) => setCurrentTime(t),
+      });
+      enableTheatreWriteBack();
+      // Ensure playhead starts at current time
+      setTheatreTime(currentTime);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.version]);
+
   // SSE connection for real-time updates
   useEffect(() => {
+    if (didSseRef.current) return;
+    didSseRef.current = true;
     eventSourceRef.current = new EventSource('http://localhost:3001/api/stream');
 
     eventSourceRef.current.onopen = () => {
@@ -63,6 +91,12 @@ function App() {
     };
   }, [loadProject]);
 
+  // After any project reload (SSE/manual), apply external transforms to Theatre.
+  useEffect(() => {
+    if (!project) return;
+    applyExternalProjectToTheatre(project);
+  }, [project]);
+
   // Playback loop
   useEffect(() => {
     if (!isPlaying || !project) return;
@@ -74,6 +108,7 @@ function App() {
           setIsPlaying(false);
           return 0;
         }
+        setTheatreTime(next);
         return next;
       });
     }, 1000 / project.meta.fps);
@@ -88,6 +123,7 @@ function App() {
   const handleTimeChange = (time: number) => {
     setCurrentTime(time);
     setIsPlaying(false);
+    setTheatreTime(time);
   };
 
   return (
@@ -145,18 +181,7 @@ function App() {
         />
       </footer>
 
-      {/* Theatre Panel - API Mode */}
-      {project && (
-        <div style={{
-          position: 'fixed',
-          right: 0,
-          top: '60px',
-          bottom: '140px',
-          zIndex: 100
-        }}>
-          <TheatrePanel project={project} onUpdate={loadProject} />
-        </div>
-      )}
+      {/* Native Theatre Studio UI now handles editing + keyframing */}
     </div>
   );
 }

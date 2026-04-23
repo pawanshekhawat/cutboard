@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { ProjectData } from '../lib/api';
+import { subscribeToTheatreElementValues } from '../lib/theatre-native';
 
 interface CanvasProps {
   project: ProjectData | null;
@@ -7,6 +8,38 @@ interface CanvasProps {
 }
 
 export const Canvas: React.FC<CanvasProps> = ({ project, currentTime }) => {
+  const [liveTransforms, setLiveTransforms] = useState<
+    Record<string, { x: number; y: number; scale: number; rotation: number; opacity: number }>
+  >({});
+
+  // Subscribe to Theatre object values so React re-renders live while dragging/scrubbing.
+  useEffect(() => {
+    if (!project) return;
+
+    const unsubs: Array<() => void> = [];
+    for (const el of Object.values(project.elements)) {
+      const unsub = subscribeToTheatreElementValues(el.id, (vals) => {
+        const t = vals?.transform as any;
+        if (!t) return;
+        setLiveTransforms((prev) => ({
+          ...prev,
+          [el.id]: {
+            x: typeof t.x === 'number' ? t.x : 0,
+            y: typeof t.y === 'number' ? t.y : 0,
+            scale: typeof t.scale === 'number' ? t.scale : 1,
+            rotation: typeof t.rotation === 'number' ? t.rotation : 0,
+            opacity: typeof t.opacity === 'number' ? t.opacity : 1,
+          },
+        }));
+      });
+      if (unsub) unsubs.push(unsub);
+    }
+
+    return () => {
+      for (const u of unsubs) u();
+    };
+  }, [project]);
+
   const canvasStyle = useMemo(() => {
     if (!project) return {};
     return {
@@ -25,47 +58,20 @@ export const Canvas: React.FC<CanvasProps> = ({ project, currentTime }) => {
     );
   }, [project, currentTime]);
 
-  const computeValueAtTime = (element: ProjectData['elements'][string], time: number) => {
-    const base = element.transform;
-    const result = { ...base };
+  const computeTransform = (element: ProjectData['elements'][string]) => {
+    // Theatre subscription (preferred): React state drives DOM updates.
+    const live = liveTransforms[element.id];
+    if (live) return live;
 
-    if (!project?.animations) return result;
-
-    // Group animations by target element
-    const elementAnimations = Object.values(project.animations)
-      .filter(anim => anim.target === element.id);
-
-    for (const anim of elementAnimations) {
-      const { property, keyframes } = anim;
-      
-      if (keyframes.length === 0) continue;
-
-      // Find surrounding keyframes
-      let before = keyframes[0];
-      let after = keyframes[keyframes.length - 1];
-
-      for (let i = 0; i < keyframes.length - 1; i++) {
-        if (time >= keyframes[i].time && time <= keyframes[i + 1].time) {
-          before = keyframes[i];
-          after = keyframes[i + 1];
-          break;
-        }
-      }
-
-      // Linear interpolation
-      const t = before.time === after.time 
-        ? 0 
-        : (time - before.time) / (after.time - before.time);
-      const value = before.value + (after.value - before.value) * t;
-
-      // Apply to result
-      const [target, prop] = property.split('.');
-      if (target === 'transform' && prop) {
-        (result as any)[prop] = value;
-      }
-    }
-
-    return result;
+    // Fallback: use base transform from project.json (no interpolation).
+    const base: any = element.transform ?? {};
+    return {
+      x: typeof base.x === 'number' ? base.x : 0,
+      y: typeof base.y === 'number' ? base.y : 0,
+      scale: typeof base.scale === 'number' ? base.scale : 1,
+      rotation: typeof base.rotation === 'number' ? base.rotation : 0,
+      opacity: typeof base.opacity === 'number' ? base.opacity : 1,
+    };
   };
 
   if (!project) {
@@ -79,7 +85,7 @@ export const Canvas: React.FC<CanvasProps> = ({ project, currentTime }) => {
   return (
     <div style={canvasStyle}>
       {elements.map(el => {
-        const transform = computeValueAtTime(el, currentTime);
+        const transform = computeTransform(el);
         
         const style: React.CSSProperties = {
           position: 'absolute',

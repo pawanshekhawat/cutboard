@@ -53,8 +53,19 @@ server.get('/api/stream', (req, reply) => {
   // Send initial connection event
   client.write(`data: ${JSON.stringify({ type: 'connected', timestamp: Date.now() })}\n\n`);
 
+  // Keep-alive ping to prevent proxies/servers from closing idle SSE connections
+  const keepAlive = setInterval(() => {
+    try {
+      // SSE comment line (ignored by EventSource)
+      client.write(':\n\n');
+    } catch {
+      // ignore
+    }
+  }, 15000);
+
   // Cleanup on client disconnect
   req.raw.on('close', () => {
+    clearInterval(keepAlive);
     sseClients.delete(client);
     server.log.info('SSE client disconnected');
   });
@@ -161,7 +172,7 @@ server.post('/api/project/element', async (request, reply) => {
 // Update keyframe
 server.post('/api/project/keyframe', async (request, reply) => {
   const body = request.body as any;
-  const { projectPath = PROJECT_PATH, elementId, property, keyframeIndex, value } = body;
+  const { projectPath = PROJECT_PATH, elementId, property, keyframeIndex, value, time, easing } = body;
 
   try {
     const data = readFileSync(projectPath, 'utf-8');
@@ -182,7 +193,17 @@ server.post('/api/project/keyframe', async (request, reply) => {
       return reply.status(404).send({ error: 'Keyframe not found' });
     }
 
-    animation.keyframes[keyframeIndex].value = value;
+    if (typeof value !== 'undefined') {
+      animation.keyframes[keyframeIndex].value = value;
+    }
+    if (typeof time === 'number') {
+      animation.keyframes[keyframeIndex].time = time;
+      // Keep keyframes sorted by time
+      animation.keyframes.sort((a: any, b: any) => a.time - b.time);
+    }
+    if (typeof easing === 'string') {
+      animation.easing = easing;
+    }
 
     writeFileSync(projectPath, JSON.stringify(project, null, 2));
     

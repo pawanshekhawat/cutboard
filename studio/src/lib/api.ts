@@ -77,14 +77,17 @@ export const api = {
     elementId: string,
     property: string,
     keyframeIndex: number,
-    value: number
+    value: number,
+    opts?: { time?: number; easing?: string }
   ): Promise<ProjectData> {
     const response = await axios.post(`${API_BASE}/api/project/keyframe`, {
       projectPath,
       elementId,
       property,
       keyframeIndex,
-      value
+      value,
+      time: opts?.time,
+      easing: opts?.easing
     });
     return response.data;
   },

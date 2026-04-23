@@ -1,7 +1,16 @@
-// Initialize Theatre Studio only in development to avoid bundling it in production
-if (import.meta.env.DEV) {
-  import('./theatre-init');
-}
+import studio from '@theatre/studio';
+
+// Theatre Studio must be initialized synchronously at the entry point.
+// Note: bundlers may expose it under { default: studio }.
+const studioAny = studio as any;
+const studioImpl =
+  typeof studioAny?.initialize === 'function'
+    ? studioAny
+    : typeof studioAny?.default?.initialize === 'function'
+      ? studioAny.default
+      : null;
+
+studioImpl?.initialize?.();
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
