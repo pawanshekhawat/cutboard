@@ -27,7 +27,7 @@ export function startWatcher(root: string, onChange: Listener): chokidar.FSWatch
   return watcher;
 }
 
-export function stopWatcher(): void {
+function stopWatcher(): void {
   if (watcher) {
     watcher.close();
     watcher = null;

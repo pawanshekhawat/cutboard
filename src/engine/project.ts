@@ -7,7 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_FILE = 'project.json';
 
 // ─── Validation ────────────────────────────────────────────────────────────
-export function validateProject(raw: unknown): Project {
+function validateProject(raw: unknown): Project {
   if (!raw || typeof raw !== 'object') throw new Error('project.json must be an object');
   const p = raw as Record<string, unknown>;
 
@@ -77,7 +77,7 @@ export function computeDuration(elements: Project['elements']): number {
 // ─── Element CRUD helpers ──────────────────────────────────────────────────
 import { randomId } from '../utils/id.js';
 
-export function addElement<T extends Project['elements'][string]>(
+function addElement<T extends Project['elements'][string]>(
   project: Project,
   element: T
 ): Project {
@@ -101,7 +101,7 @@ export function addElement<T extends Project['elements'][string]>(
   return project;
 }
 
-export function removeElement(project: Project, elementId: string): Project {
+function removeElement(project: Project, elementId: string): Project {
   const { elements, tracks, animations, effects } = project;
 
   delete elements[elementId];

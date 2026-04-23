@@ -201,7 +201,7 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
 }
 
 // ─── Preview ───────────────────────────────────────────────────────────────
-export function renderPreview(project: Project, outputPath = './output/preview.png'): void {
+function renderPreview(project: Project, outputPath = './output/preview.png'): void {
   const { meta } = project;
   try {
     execSync(`"${FFMPEG}" -y -f lavfi -i "testsrc=d=1:size=${meta.resolution.width}x${meta.resolution.height}:rate=1" -frames:v 1 -q:v 2 "${resolve(outputPath)}"`, { stdio: 'pipe' });
