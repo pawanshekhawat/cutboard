@@ -199,7 +199,13 @@ ffmpeg -i input.mp4 -vf "drawtext=text='Hello':fontsize=48:fontcolor=white:x=100
 |--------|----------|-------------|
 | GET | `/` | Health check |
 | GET | `/api/project` | Get project.json |
-| POST | `/api/project/element` | Update element |
+| GET | `/api/project/frame` | Proxy preview frame at time |
+| GET | `/api/audio/waveform` | Extract normalized audio peaks (cached) |
+| POST | `/api/assets` | Upload asset (video/audio/image) |
+| POST | `/api/project/element` | Patch an existing element |
+| POST | `/api/project/elements` | Create a new element on a track |
+| DELETE | `/api/project/elements/:elementId` | Delete an element |
+| PUT | `/api/project/tracks/reorder` | Reorder tracks (layering) |
 | POST | `/api/project/keyframe` | Update keyframe |
 | POST | `/api/project/animation` | Add animation |
 | GET | `/api/stream` | SSE real-time updates |
@@ -288,19 +294,24 @@ setTimeout(() => unlockElement(elementId, 'transform.x'), 100);
 - [x] FFmpeg rendering pipeline (frame-accurate trimming)
 - [x] Script Engine API (addVideo, addText, addImage, setKeyframe)
 - [x] Fastify API Server with SSE
-- [x] React Studio UI (Canvas + Timeline)
-- [x] Theatre.js integration with two-way sync
+- [x] React Studio UI (Canvas + Timeline + Asset Manager)
+- [x] Asset uploads + draggable asset library
+- [x] Timeline drag-and-drop (assets → timeline)
+- [x] Track rows + track reordering (layering)
+- [x] Clip editing: move (start) + NLE-style trims (trimStart + duration)
+- [x] Audio playback in Studio (hidden `<audio>` synced to playhead)
+- [x] Audio waveform rendering in timeline (cached + trim-respecting)
+- [x] Right-click clip context menu with Delete
+- [x] Theatre.js integration with two-way sync + write-back
 - [x] Chokidar file watcher on backend
 - [x] No UI-only state architecture
 
 ### 🔄 In Progress
-- [ ] Theatre.js studio panel initialization (fixing `studio.initialize()`)
-- [ ] Animation keyframe editing in Theatre.js
-- [ ] Video preview in Studio UI
+- [ ] Rich track model (multi-clip lanes per track, overlap rules, snapping)
+- [ ] Timeline operations (duplicate, split, ripple delete)
+- [ ] Effects + blend modes surfaced in the context menu
 
 ### 📋 TODO
-- [ ] Full Theatre.js timeline integration
-- [ ] Audio waveform visualization
 - [ ] Export to Remotion composition
 - [ ] Collaborative editing via WebSocket
 
