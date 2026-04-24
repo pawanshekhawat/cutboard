@@ -58,30 +58,6 @@ export interface ProjectData {
   }>;
 }
 
-export interface AddElementPayload {
-  id: string;
-  type: 'video' | 'image' | 'text' | 'audio' | 'composition';
-  assetId?: string;
-  content?: string;
-  style?: {
-    fontSize?: number;
-    color?: string;
-    fontFamily?: string;
-  };
-  start: number;
-  duration: number;
-  trimStart?: number;
-  trimDuration?: number;
-  volume?: number;
-  transform: {
-    x: number;
-    y: number;
-    scale: number;
-    rotation: number;
-    opacity: number;
-  };
-}
-
 export const api = {
   async getProject(projectPath?: string): Promise<ProjectData> {
     const response = await axios.get(buildApiUrl('/api/project'), {
@@ -172,13 +148,5 @@ export const api = {
       },
     });
     return response.data;
-  },
-
-  async saveProject(projectPath: string | undefined, project: ProjectData): Promise<ProjectData> {
-    const response = await axios.post(buildApiUrl('/api/project/save'), {
-      ...(projectPath ? { projectPath } : withProjectPath()),
-      project,
-    });
-    return normalizeProjectContract(response.data).project as unknown as ProjectData;
   }
 };

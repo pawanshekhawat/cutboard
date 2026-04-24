@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { AddElementPayload, ProjectData } from '../lib/api';
+import type { ProjectData } from '../lib/api';
 import { api } from '../lib/api';
 import { PROJECT_PATH } from '../lib/config';
 import { lockElement, unlockElement } from '../lib/theatre-sync';
@@ -30,16 +30,6 @@ type MoveDragState = {
   startClientX: number;
   pixelsPerSecond: number;
   oldStart: number;
-};
-
-type AssetDragPayload = {
-  assetId: string;
-  type: 'video' | 'image' | 'audio' | 'composition';
-  src?: string;
-};
-
-type TrackDragState = {
-  fromIndex: number;
 };
 
 interface TimelineProps {
@@ -75,9 +65,6 @@ export const Timeline: React.FC<TimelineProps> = ({
   const moveDragRef = useRef<MoveDragState | null>(null);
   const [pendingEdits, setPendingEdits] = useState<Record<string, PendingTimingPatch>>({});
   const pendingEditsRef = useRef<Record<string, PendingTimingPatch>>({});
-  const [isDropOver, setIsDropOver] = useState(false);
-  const trackDragRef = useRef<TrackDragState | null>(null);
-  const [trackDropIndex, setTrackDropIndex] = useState<number | null>(null);
 
   const getElementWithPending = (elementId: string) => {
     const base = project.elements[elementId];
@@ -471,147 +458,6 @@ export const Timeline: React.FC<TimelineProps> = ({
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const createElementFromAsset = (
-    asset: AssetDragPayload,
-    start: number
-  ): AddElementPayload => {
-    const assetMeta = project.assets?.[asset.assetId];
-    const fallbackDuration = 5;
-    const safeDuration = Math.max(
-      minDuration,
-      Number.isFinite(Number(assetMeta?.duration)) && Number(assetMeta?.duration) > 0
-        ? Number(assetMeta?.duration)
-        : fallbackDuration
-    );
-    const id = `el_${asset.type}_${Math.random().toString(36).slice(2, 8)}`;
-    const base = {
-      id,
-      start,
-      duration: safeDuration,
-      transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
-    };
-
-    if (asset.type === 'video') {
-      return {
-        ...base,
-        type: 'video',
-        assetId: asset.assetId,
-        trimStart: 0,
-        trimDuration: safeDuration,
-      };
-    }
-    if (asset.type === 'audio') {
-      return {
-        ...base,
-        type: 'audio',
-        assetId: asset.assetId,
-        trimStart: 0,
-        volume: 1,
-      };
-    }
-    if (asset.type === 'composition') {
-      return {
-        ...base,
-        type: 'composition',
-        assetId: asset.assetId,
-        trimStart: 0,
-        trimDuration: safeDuration,
-      };
-    }
-    return {
-      ...base,
-      type: 'image',
-      assetId: asset.assetId,
-    };
-  };
-
-  const persistProject = async (nextProject: ProjectData) => {
-    await api.saveProject(PROJECT_PATH, nextProject);
-    await Promise.resolve(onProjectRefresh?.());
-  };
-
-  const reorderTracksAndElements = async (fromIndex: number, toIndex: number) => {
-    if (fromIndex === toIndex) return;
-    if (fromIndex < 0 || toIndex < 0) return;
-    if (!project.tracks || project.tracks.length < 2) return;
-
-    const tracks = [...project.tracks];
-    const [moved] = tracks.splice(fromIndex, 1);
-    tracks.splice(toIndex, 0, moved);
-
-    const existingElements = project.elements || {};
-    const orderedIds: string[] = [];
-    for (const track of tracks) {
-      for (const id of track.elements || []) {
-        if (!orderedIds.includes(id) && existingElements[id]) orderedIds.push(id);
-      }
-    }
-    for (const id of Object.keys(existingElements)) {
-      if (!orderedIds.includes(id)) orderedIds.push(id);
-    }
-
-    const reorderedElements: ProjectData['elements'] = {};
-    for (const id of orderedIds) {
-      const el = existingElements[id];
-      if (el) reorderedElements[id] = el;
-    }
-
-    const nextProject: ProjectData = {
-      ...project,
-      tracks: tracks as any,
-      elements: reorderedElements,
-    };
-    await persistProject(nextProject);
-  };
-
-  const handleAssetDrop = async (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setIsDropOver(false);
-    if (!timelineRef.current) return;
-
-    const raw = event.dataTransfer.getData('application/x-cutboard-asset');
-    if (!raw) return;
-
-    let payload: AssetDragPayload | null = null;
-    try {
-      payload = JSON.parse(raw) as AssetDragPayload;
-    } catch {
-      payload = null;
-    }
-    if (!payload?.assetId || !payload?.type) return;
-
-    const rect = timelineRef.current.getBoundingClientRect();
-    const clampedX = clamp(event.clientX - rect.left, 0, rect.width);
-    const start = clamp((clampedX / Math.max(rect.width, 1)) * duration, 0, Number.POSITIVE_INFINITY);
-
-    const yInTracks = event.clientY - rect.top - rulerHeight;
-    const targetTrackIndex = clamp(Math.floor(yInTracks / trackHeight), 0, Math.max(trackCount - 1, 0));
-
-    try {
-      const element = createElementFromAsset(payload, start);
-      const nextProject: ProjectData = JSON.parse(JSON.stringify(project));
-      if (!nextProject.elements || typeof nextProject.elements !== 'object') nextProject.elements = {} as any;
-      nextProject.elements[element.id] = element as any;
-
-      if (!Array.isArray(nextProject.tracks)) nextProject.tracks = [] as any;
-      const preferredTrack = nextProject.tracks[targetTrackIndex];
-      if (preferredTrack) {
-        preferredTrack.elements = Array.isArray(preferredTrack.elements) ? preferredTrack.elements : [];
-        preferredTrack.elements.push(element.id);
-      } else {
-        nextProject.tracks.push({
-          id: `track_${payload.type}_${Math.random().toString(36).slice(2, 6)}`,
-          type: payload.type === 'audio' ? 'audio' : 'video',
-          elements: [element.id],
-        } as any);
-      }
-
-      await persistProject(nextProject);
-    } catch (err) {
-      console.error('Failed to add dropped asset to timeline:', err);
-    }
-  };
-
   return (
     <div style={{ padding: '20px', backgroundColor: '#1a1a1a', color: '#fff' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '20px', marginBottom: '20px' }}>
@@ -636,20 +482,11 @@ export const Timeline: React.FC<TimelineProps> = ({
       </div>
 
       <div
-        onDragOver={(event) => {
-          event.preventDefault();
-          if (!event.dataTransfer.types.includes('application/x-cutboard-asset')) return;
-          event.dataTransfer.dropEffect = 'copy';
-          setIsDropOver(true);
-        }}
-        onDragLeave={() => setIsDropOver(false)}
-        onDrop={handleAssetDrop}
         style={{
           maxHeight: `${timelineViewportHeight}px`,
           overflowY: 'auto',
-          backgroundColor: isDropOver ? '#34495e' : '#2a2a2a',
+          backgroundColor: '#2a2a2a',
           borderRadius: '4px',
-          transition: 'background-color 120ms ease',
         }}
       >
         <div ref={timelineRef} style={{ position: 'relative', height: `${timelineInnerHeight}px` }}>
@@ -693,60 +530,16 @@ export const Timeline: React.FC<TimelineProps> = ({
               project.tracks.map((track, trackIndex) => (
                 <div
                   key={track.id}
-                  onDragOver={(e) => {
-                    if (!e.dataTransfer.types.includes('application/x-cutboard-track')) return;
-                    e.preventDefault();
-                    setTrackDropIndex(trackIndex);
-                  }}
-                  onDrop={(e) => {
-                    if (!e.dataTransfer.types.includes('application/x-cutboard-track')) return;
-                    e.preventDefault();
-                    const drag = trackDragRef.current;
-                    trackDragRef.current = null;
-                    setTrackDropIndex(null);
-                    if (!drag) return;
-                    void reorderTracksAndElements(drag.fromIndex, trackIndex);
-                  }}
                   style={{
                     position: 'absolute',
                     top: `${trackIndex * trackHeight}px`,
                     left: 0,
                     right: 0,
                     height: '28px',
-                    backgroundColor: trackDropIndex === trackIndex ? '#3d4f62' : '#333',
+                    backgroundColor: '#333',
                     marginBottom: '2px'
                   }}
                 >
-                  <div
-                    draggable
-                    onDragStart={(e) => {
-                      trackDragRef.current = { fromIndex: trackIndex };
-                      e.dataTransfer.setData('application/x-cutboard-track', String(trackIndex));
-                      e.dataTransfer.effectAllowed = 'move';
-                    }}
-                    onDragEnd={() => {
-                      trackDragRef.current = null;
-                      setTrackDropIndex(null);
-                    }}
-                    style={{
-                      position: 'absolute',
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: '22px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: '#bbb',
-                      cursor: 'grab',
-                      background: 'rgba(0,0,0,0.18)',
-                      zIndex: 4,
-                      userSelect: 'none',
-                    }}
-                    title="Drag to reorder track"
-                  >
-                    ::
-                  </div>
                   {track.elements.map(elementId => {
                     const element = getElementWithPending(elementId);
                     if (!element) return null;
@@ -773,8 +566,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                           overflow: 'hidden',
                           whiteSpace: 'nowrap',
                           textOverflow: 'ellipsis',
-                          cursor: 'grab',
-                          zIndex: 1
+                          cursor: 'grab'
                         }}
                       >
                         {(isLeftTrimmable || isRightTrimmable) && (

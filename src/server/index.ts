@@ -806,25 +806,6 @@ server.post('/api/project/animation', async (request, reply) => {
   }
 });
 
-// Save entire project (used for structural edits like track order and new element insertion)
-server.post('/api/project/save', async (request, reply) => {
-  const body = request.body as any;
-  const { projectPath = PROJECT_PATH, project: nextProject } = body ?? {};
-
-  try {
-    if (!nextProject || typeof nextProject !== 'object') {
-      return reply.status(400).send({ error: 'Missing project payload' });
-    }
-
-    const normalized = normalizeProjectContract(nextProject).project;
-    writeFileSync(projectPath, JSON.stringify(normalized, null, 2));
-    broadcastUpdate();
-    return normalized;
-  } catch (error: any) {
-    return reply.status(500).send({ error: error?.message || 'Failed to save project' });
-  }
-});
-
 // Start server
 const start = async () => {
   try {
