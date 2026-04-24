@@ -1,7 +1,19 @@
 import { execSync } from 'child_process';
-import { resolve, dirname } from 'path';
-import { mkdirSync } from 'fs';
-import type { Project, VideoElement, TextElement, Animation, Keyframe, AudioElement } from '../types/schema.js';
+import { resolve, dirname, basename } from 'path';
+import { mkdirSync, existsSync, statSync, readFileSync } from 'fs';
+import { createHash } from 'crypto';
+import type {
+  Project,
+  VideoElement,
+  ImageElement,
+  TextElement,
+  Animation,
+  Keyframe,
+  AudioElement,
+  CompositionAsset,
+  Transform,
+} from '../types/schema.js';
+import { loadProject, loadProjectFromPath, resolveProjectRootFromSrc, computeDuration } from './project.js';
 import ffmpegStatic from 'ffmpeg-static';
 import * as ffprobe from 'ffprobe-static';
 
@@ -72,17 +84,160 @@ export function probeAsset(src: string): { duration: number; width: number; heig
 }
 
 // ─── Timeline map ───────────────────────────────────────────────────────────
-type TLEntry = { id: string; src: string; start: number; end: number; trimStart: number };
-type AudioTLEntry = { id: string; src: string; start: number; duration: number; trimStart: number; volume: number };
+type VisualKind = 'video' | 'composition' | 'image';
+type VisualTLEntry = {
+  id: string;
+  kind: VisualKind;
+  src: string;
+  start: number;
+  end: number;
+  trimStart: number;
+  transform: Transform;
+};
+type AudioTLEntry = {
+  id: string;
+  src: string;
+  start: number;
+  duration: number;
+  trimStart: number;
+  trimDuration: number;
+  volume: number;
+};
 
-function buildTimeline(project: Project): TLEntry[] {
-  const entries: TLEntry[] = [];
+function listProjectDependencyPaths(project: Project, projectRoot: string): string[] {
+  const deps: string[] = [resolve(projectRoot, 'project.json')];
+
+  for (const asset of Object.values(project.assets || {})) {
+    if (!asset?.src) continue;
+    const abs = resolve(projectRoot, asset.src);
+    deps.push(abs);
+
+    if (asset.type === 'composition') {
+      const childRoot = resolveProjectRootFromSrc(projectRoot, asset.src);
+      deps.push(resolve(childRoot, 'project.json'));
+    }
+  }
+
+  return deps;
+}
+
+function safeMtimeMs(absPath: string): number {
+  try {
+    if (!existsSync(absPath)) return 0;
+    const st = statSync(absPath);
+    return st.mtimeMs || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function computeCompositionCacheKey(childRoot: string): string {
+  const projectJson = resolve(childRoot, 'project.json');
+  const child = loadProject(childRoot);
+  const computedDuration = computeDuration(child.elements);
+  if (!child.meta.duration || child.meta.duration < computedDuration) {
+    child.meta.duration = computedDuration;
+  }
+
+  const deps = listProjectDependencyPaths(child, childRoot);
+  const mtimes = deps
+    .map(p => `${p}:${safeMtimeMs(p)}`)
+    .sort()
+    .join('\n');
+
+  const h = createHash('sha1');
+  h.update(readFileSync(projectJson, 'utf-8'));
+  h.update('\n');
+  h.update(JSON.stringify(child.meta));
+  h.update('\n');
+  h.update(mtimes);
+  return h.digest('hex').slice(0, 24);
+}
+
+function resolveCompositionToCachedVideo(
+  parentRoot: string,
+  asset: CompositionAsset,
+  parentCacheRootAbs: string
+): string {
+  const childRoot = resolveProjectRootFromSrc(parentRoot, asset.src);
+  const childProjectJson = resolve(childRoot, 'project.json');
+  if (!existsSync(childProjectJson)) {
+    throw new Error(`Composition asset missing child project.json at ${childProjectJson}`);
+  }
+
+  const key = computeCompositionCacheKey(childRoot);
+  const outAbs = resolve(parentCacheRootAbs, `${basename(childRoot)}-${key}.mp4`);
+  mkdirSync(dirname(outAbs), { recursive: true });
+
+  if (existsSync(outAbs)) return outAbs;
+
+  const childProject = existsSync(childProjectJson)
+    ? loadProject(childRoot)
+    : loadProjectFromPath(childProjectJson);
+
+  const computedDuration = computeDuration(childProject.elements);
+  if (!childProject.meta.duration || childProject.meta.duration < computedDuration) {
+    childProject.meta.duration = computedDuration;
+  }
+
+  render(childProject, outAbs, childRoot);
+  return outAbs;
+}
+
+function normalizeElementTransform(t: unknown): Transform {
+  const tr = (t ?? {}) as Partial<Transform>;
+  return {
+    x: typeof tr.x === 'number' ? tr.x : 0,
+    y: typeof tr.y === 'number' ? tr.y : 0,
+    scale: typeof tr.scale === 'number' ? tr.scale : 1,
+    rotation: typeof tr.rotation === 'number' ? tr.rotation : 0,
+    opacity: typeof tr.opacity === 'number' ? tr.opacity : 1,
+  };
+}
+
+function buildTimeline(project: Project, root: string, compositionCacheRootAbs: string): VisualTLEntry[] {
+  const entries: VisualTLEntry[] = [];
   for (const [id, el] of Object.entries(project.elements)) {
-    if (el.type !== 'video') continue;
-    const asset = project.assets[el.assetId];
-    if (!asset || asset.type !== 'video') continue;
-    const vid = el as VideoElement;
-    entries.push({ id, src: (asset as any).src, start: el.start, end: el.start + el.duration, trimStart: vid.trimStart ?? 0 });
+    if (el.type !== 'video' && el.type !== 'composition' && el.type !== 'image') continue;
+    const assetId = (el as any).assetId as string | undefined;
+    if (!assetId) continue;
+    const asset = project.assets[assetId];
+    if (!asset) continue;
+    const tr = normalizeElementTransform(el.transform);
+    const vid = el as any as VideoElement;
+    if (asset.type === 'video') {
+      entries.push({
+        id,
+        kind: 'video',
+        src: (asset as any).src,
+        start: el.start,
+        end: el.start + el.duration,
+        trimStart: vid.trimStart ?? 0,
+        transform: tr,
+      });
+    } else if (asset.type === 'composition') {
+      const cachedAbs = resolveCompositionToCachedVideo(root, asset as CompositionAsset, compositionCacheRootAbs);
+      entries.push({
+        id,
+        kind: 'composition',
+        src: cachedAbs,
+        start: el.start,
+        end: el.start + el.duration,
+        trimStart: vid.trimStart ?? 0,
+        transform: tr,
+      });
+    } else if (asset.type === 'image' && el.type === 'image') {
+      const img = el as ImageElement;
+      entries.push({
+        id,
+        kind: 'image',
+        src: (asset as any).src,
+        start: el.start,
+        end: el.start + el.duration,
+        trimStart: img.trimStart ?? 0,
+        transform: tr,
+      });
+    }
   }
   return entries.sort((a, b) => a.start - b.start);
 }
@@ -100,6 +255,7 @@ function buildAudioTimeline(project: Project): AudioTLEntry[] {
       start: el.start,
       duration: el.duration,
       trimStart: ael.trimStart ?? 0,
+      trimDuration: ael.trimDuration ?? el.duration,
       volume: ael.volume ?? 1,
     });
   }
@@ -133,7 +289,8 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
   mkdirSync(dirname(absOutput), { recursive: true });
 
   const textEls = Object.values(elements).filter(el => el.type === 'text') as TextElement[];
-  const timeline = buildTimeline(project);
+  const compositionCacheRootAbs = resolve(root, 'output/.cache/compositions');
+  const timeline = buildTimeline(project, root, compositionCacheRootAbs);
   const audioTimeline = buildAudioTimeline(project);
 
   // ── No video → text-over-testsrc (proven path) ────────────────────────
@@ -174,7 +331,7 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
     }
   }
 
-  // ── Video clips + optional text ───────────────────────────────────────
+  // ── Visual clips + optional text ───────────────────────────────────────
   // Unique asset paths → input indices (relative to project root)
   const assetList: string[] = [];
   const assetIdx = new Map<string, number>();
@@ -191,11 +348,24 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
   // Black background (exact duration)
   fl.push(`color=c=black:size=${meta.resolution.width}x${meta.resolution.height}:rate=${meta.fps}:duration=${dur}[base]`);
 
-  // Trim + offset each clip
+  // Build each visual layer stream.
   for (let i = 0; i < timeline.length; i++) {
     const e = timeline[i];
     const ii = assetIdx.get(e.src)!;
     const clipDur = e.end - e.start;
+    if (e.kind === 'image') {
+      const scaleExpr = getAnimatedValue(e.id, 'transform.scale', project.animations, e.transform.scale);
+      const rotationExpr = getAnimatedValue(e.id, 'transform.rotation', project.animations, e.transform.rotation);
+      const opacity = Math.max(0, Math.min(1, e.transform.opacity));
+      fl.push(
+        `[${ii}:v]fps=${meta.fps},trim=duration=${clipDur},setpts=PTS-STARTPTS,` +
+        `scale=w='iw*(${scaleExpr})':h='ih*(${scaleExpr})':eval=frame,` +
+        `rotate='(${rotationExpr})*PI/180':ow='rotw(iw)':oh='roth(ih)':c=none,` +
+        `format=rgba,colorchannelmixer=aa=${opacity}[v${i}]`
+      );
+      continue;
+    }
+
     const fx = getVideoEffectsFilter(project, e.id);
     fl.push(
       `[${ii}:v]trim=start=${e.trimStart}:duration=${clipDur},setpts=PTS-STARTPTS+${e.start}/TB,` +
@@ -203,13 +373,26 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
     );
   }
 
-  // Chain overlays: each clip shows only during its global time window
+  // Chain overlays in timeline order.
   let prev = '[base]';
   for (let i = 0; i < timeline.length; i++) {
     const e = timeline[i];
     const outL = i === timeline.length - 1 ? '[vout]' : `[tmp${i}]`;
-    fl.push(`${prev}[v${i}]overlay=0:0:enable='between(t,${e.start},${e.end})'${outL}`);
+    if (e.kind === 'image') {
+      const xExpr = getAnimatedValue(e.id, 'transform.x', project.animations, e.transform.x);
+      const yExpr = getAnimatedValue(e.id, 'transform.y', project.animations, e.transform.y);
+      fl.push(
+        `${prev}[v${i}]overlay=` +
+        `x='${xExpr}-overlay_w/2':y='${yExpr}-overlay_h/2':` +
+        `enable='between(t,${e.start},${e.end})'${outL}`
+      );
+    } else {
+      fl.push(`${prev}[v${i}]overlay=0:0:enable='between(t,${e.start},${e.end})'${outL}`);
+    }
     prev = outL;
+  }
+  if (timeline.length === 0) {
+    fl.push('[base]null[vout]');
   }
 
   // Text overlays on top (with animation support)
@@ -239,7 +422,7 @@ export function render(project: Project, outputPath = './output/render.mp4', roo
     const delayMs = Math.max(0, Math.round(a.start * 1000));
     const out = `[a${i}]`;
     fl.push(
-      `[${ii}:a]atrim=start=${a.trimStart}:duration=${a.duration},asetpts=PTS-STARTPTS,` +
+      `[${ii}:a]atrim=start=${a.trimStart}:duration=${a.trimDuration},asetpts=PTS-STARTPTS,` +
       `adelay=${delayMs}|${delayMs},volume=${a.volume}${out}`
     );
     audioLabels.push(out);

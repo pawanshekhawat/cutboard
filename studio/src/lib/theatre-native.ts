@@ -3,9 +3,8 @@ import studio from '@theatre/studio';
 import type { ISheet, ISheetObject } from '@theatre/core';
 import type { ProjectData } from './api';
 import { api } from './api';
+import { PROJECT_PATH } from './config';
 import { isElementLocked, lockElement, unlockElement } from './theatre-sync';
-
-const PROJECT_PATH = 'D:\\Coding\\Projects\\cutboard\\project.json';
 
 type TheatreObjectValues = {
   transform: { x: number; y: number; scale: number; rotation: number; opacity: number };
@@ -355,4 +354,3 @@ export function enableTheatreWriteBack() {
     };
   }
 }
-

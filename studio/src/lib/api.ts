@@ -1,6 +1,6 @@
 import axios from 'axios';
-
-const API_BASE = 'http://localhost:3001';
+import { normalizeProjectContract } from '../../../src/shared/project-contract.ts';
+import { buildApiUrl, withProjectPath } from './config';
 
 export interface ProjectData {
   version: string;
@@ -12,13 +12,14 @@ export interface ProjectData {
   };
   assets: Record<string, {
     id?: string;
-    type: 'video' | 'image' | 'audio';
+    type: 'video' | 'image' | 'audio' | 'composition';
     src: string;
     duration?: number;
+    resolution?: { width: number; height: number };
   }>;
   elements: Record<string, {
     id: string;
-    type: 'video' | 'image' | 'text' | 'audio';
+    type: 'video' | 'image' | 'text' | 'audio' | 'composition';
     assetId?: string;
     content?: string;
     style?: {
@@ -30,6 +31,7 @@ export interface ProjectData {
     duration: number;
     trimStart?: number;
     trimDuration?: number;
+    volume?: number;
     transform: {
       x: number;
       y: number;
@@ -48,24 +50,49 @@ export interface ProjectData {
     target: string;
     property: string;
     keyframes: Array<{
+      id: string;
       time: number;
       value: number;
-      easing?: string;
     }>;
+    easing?: string;
   }>;
 }
 
+export interface AddElementPayload {
+  id: string;
+  type: 'video' | 'image' | 'text' | 'audio' | 'composition';
+  assetId?: string;
+  content?: string;
+  style?: {
+    fontSize?: number;
+    color?: string;
+    fontFamily?: string;
+  };
+  start: number;
+  duration: number;
+  trimStart?: number;
+  trimDuration?: number;
+  volume?: number;
+  transform: {
+    x: number;
+    y: number;
+    scale: number;
+    rotation: number;
+    opacity: number;
+  };
+}
+
 export const api = {
-  async getProject(projectPath: string): Promise<ProjectData> {
-    const response = await axios.get(`${API_BASE}/api/project`, {
-      params: { path: projectPath }
+  async getProject(projectPath?: string): Promise<ProjectData> {
+    const response = await axios.get(buildApiUrl('/api/project'), {
+      params: projectPath ? { path: projectPath } : withProjectPath()
     });
-    return response.data;
+    return normalizeProjectContract(response.data).project as unknown as ProjectData;
   },
 
-  async updateElement(projectPath: string, elementId: string, updates: Partial<ProjectData['elements'][0]>): Promise<ProjectData> {
-    const response = await axios.post(`${API_BASE}/api/project/element`, {
-      projectPath,
+  async updateElement(projectPath: string | undefined, elementId: string, updates: Partial<ProjectData['elements'][0]>): Promise<ProjectData> {
+    const response = await axios.post(buildApiUrl('/api/project/element'), {
+      ...(projectPath ? { projectPath } : withProjectPath()),
       elementId,
       updates
     });
@@ -73,18 +100,19 @@ export const api = {
   },
 
   async updateKeyframe(
-    projectPath: string,
+    projectPath: string | undefined,
     elementId: string,
     property: string,
     keyframeIndex: number,
     value: number,
-    opts?: { time?: number; easing?: string }
+    opts?: { time?: number; easing?: string; keyframeId?: string }
   ): Promise<ProjectData> {
-    const response = await axios.post(`${API_BASE}/api/project/keyframe`, {
-      projectPath,
+    const response = await axios.post(buildApiUrl('/api/project/keyframe'), {
+      ...(projectPath ? { projectPath } : withProjectPath()),
       elementId,
       property,
       keyframeIndex,
+      keyframeId: opts?.keyframeId,
       value,
       time: opts?.time,
       easing: opts?.easing
@@ -93,21 +121,64 @@ export const api = {
   },
 
   async addKeyframe(
-    projectPath: string,
+    projectPath: string | undefined,
     elementId: string,
     property: string,
     time: number,
     value: number,
-    easing?: string
+    easing?: string,
+    keyframeId?: string
   ): Promise<ProjectData> {
-    const response = await axios.post(`${API_BASE}/api/project/animation`, {
-      projectPath,
+    const response = await axios.post(buildApiUrl('/api/project/animation'), {
+      ...(projectPath ? { projectPath } : withProjectPath()),
       elementId,
       property,
       time,
       value,
-      easing
+      easing,
+      keyframeId
     });
     return response.data;
+  },
+
+  async getAudioWaveform(
+    projectPath: string | undefined,
+    opts: { assetId?: string; src?: string; samples?: number }
+  ): Promise<{ peaks: number[]; cached: boolean }> {
+    const response = await axios.get(buildApiUrl('/api/audio/waveform'), {
+      params: projectPath
+        ? {
+            path: projectPath,
+            assetId: opts.assetId,
+            src: opts.src,
+            samples: opts.samples
+          }
+        : withProjectPath({
+            assetId: opts.assetId,
+            src: opts.src,
+            samples: opts.samples
+          })
+    });
+    return response.data;
+  },
+
+  async uploadAsset(projectPath: string | undefined, file: File): Promise<{ assetId?: string; asset?: unknown }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await axios.post(buildApiUrl('/api/assets'), formData, {
+      params: projectPath ? { path: projectPath } : withProjectPath(),
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  },
+
+  async saveProject(projectPath: string | undefined, project: ProjectData): Promise<ProjectData> {
+    const response = await axios.post(buildApiUrl('/api/project/save'), {
+      ...(projectPath ? { projectPath } : withProjectPath()),
+      project,
+    });
+    return normalizeProjectContract(response.data).project as unknown as ProjectData;
   }
 };

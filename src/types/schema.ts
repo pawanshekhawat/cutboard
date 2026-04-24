@@ -16,7 +16,7 @@ export interface Meta {
 }
 
 // ─── Assets ────────────────────────────────────────────────────────────────
-export type AssetType = 'video' | 'image' | 'audio';
+export type AssetType = 'video' | 'image' | 'audio' | 'composition';
 
 export interface BaseAsset {
   type: AssetType;
@@ -36,7 +36,18 @@ export interface AudioAsset extends BaseAsset {
   type: 'audio';
 }
 
-export type Asset = VideoAsset | ImageAsset | AudioAsset;
+export interface CompositionAsset extends BaseAsset {
+  type: 'composition';
+  /**
+   * Path to a child CutBoard project root or a child `project.json`.
+   * It is resolved relative to the *parent* project root.
+   */
+  src: string;
+  duration?: number; // seconds — optional hint; can be derived from child project
+  resolution?: Resolution; // optional hint; can be derived from child project
+}
+
+export type Asset = VideoAsset | ImageAsset | AudioAsset | CompositionAsset;
 
 export type Assets = Record<string, Asset>;
 
@@ -50,7 +61,7 @@ export interface Transform {
 }
 
 // ─── Elements ──────────────────────────────────────────────────────────────
-export type ElementType = 'video' | 'image' | 'text' | 'audio';
+export type ElementType = 'video' | 'image' | 'text' | 'audio' | 'composition';
 
 export interface BaseElement {
   id: string;
@@ -67,9 +78,18 @@ export interface VideoElement extends BaseElement {
   trimDuration: number; // seconds — how much of the source to use
 }
 
+export interface CompositionElement extends BaseElement {
+  type: 'composition';
+  assetId: string;
+  trimStart: number; // seconds — seek into the rendered child comp (0 = from start)
+  trimDuration: number; // seconds — how much of the child comp to use
+}
+
 export interface ImageElement extends BaseElement {
   type: 'image';
   assetId: string;
+  trimStart: number; // seconds — image source offset (reserved; currently 0)
+  trimDuration: number; // seconds — image source duration window (usually equals duration)
 }
 
 export interface TextElement extends BaseElement {
@@ -81,8 +101,9 @@ export interface TextElement extends BaseElement {
 export interface AudioElement extends BaseElement {
   type: 'audio';
   assetId: string;
-  trimStart?: number; // seconds — seek into source audio
-  volume?: number; // gain multiplier (1 = original)
+  trimStart: number; // seconds — seek into source audio
+  trimDuration: number; // seconds — how much source audio to use
+  volume: number; // normalized gain [0..1]
 }
 
 export interface TextStyle {
@@ -93,7 +114,7 @@ export interface TextStyle {
   textAlign?: 'left' | 'center' | 'right';
 }
 
-export type Element = VideoElement | ImageElement | TextElement | AudioElement;
+export type Element = VideoElement | CompositionElement | ImageElement | TextElement | AudioElement;
 
 export type Elements = Record<string, Element>;
 
@@ -113,6 +134,7 @@ export type Tracks = Track[];
 export type EasingType = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'spring';
 
 export interface Keyframe {
+  id: string;
   time: number;  // seconds (global timeline)
   value: number;
 }

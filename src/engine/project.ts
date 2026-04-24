@@ -1,24 +1,24 @@
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { readFileSync, writeFileSync, existsSync, statSync } from 'fs';
+import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { SCHEMA_VERSION, type Project } from '../types/schema.js';
+import { normalizeProjectContract } from '../shared/project-contract.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_FILE = 'project.json';
 
 // ─── Validation ────────────────────────────────────────────────────────────
 function validateProject(raw: unknown): Project {
-  if (!raw || typeof raw !== 'object') throw new Error('project.json must be an object');
-  const p = raw as Record<string, unknown>;
+  return normalizeProjectContract(raw).project;
+}
 
-  if (p.version !== SCHEMA_VERSION) {
-    throw new Error(`Schema version mismatch: expected ${SCHEMA_VERSION}, got ${p.version}`);
+function loadAndNormalizeProject(path: string): Project {
+  const raw = JSON.parse(readFileSync(path, 'utf-8'));
+  const normalized = normalizeProjectContract(raw);
+  if (normalized.changed) {
+    writeFileSync(path, JSON.stringify(normalized.project, null, 2), 'utf-8');
   }
-  if (!p.meta || typeof p.meta !== 'object') throw new Error('meta is required');
-  if (!Array.isArray(p.tracks)) throw new Error('tracks must be an array');
-  if (!p.elements || typeof p.elements !== 'object') throw new Error('elements must be an object');
-
-  return raw as Project;
+  return validateProject(normalized.project);
 }
 
 // ─── Load / Save ───────────────────────────────────────────────────────────
@@ -27,8 +27,24 @@ export function loadProject(root = '.'): Project {
   if (!existsSync(path)) {
     throw new Error(`No project.json found at ${path}. Run "cutboard init" first.`);
   }
-  const raw = JSON.parse(readFileSync(path, 'utf-8'));
-  return validateProject(raw);
+  return loadAndNormalizeProject(path);
+}
+
+export function loadProjectFromPath(projectJsonPath: string): Project {
+  const path = resolve(projectJsonPath);
+  if (!existsSync(path)) throw new Error(`No project.json found at ${path}`);
+  return loadAndNormalizeProject(path);
+}
+
+export function resolveProjectRootFromSrc(parentRoot: string, src: string): string {
+  const abs = resolve(parentRoot, src);
+  if (abs.toLowerCase().endsWith(`${PROJECT_FILE}`)) return dirname(abs);
+  if (!existsSync(abs)) return abs;
+
+  const st = statSync(abs);
+  if (st.isDirectory()) return abs;
+  if (st.isFile() && basename(abs).toLowerCase() === PROJECT_FILE) return dirname(abs);
+  return abs;
 }
 
 export function saveProject(project: Project, root = '.'): void {

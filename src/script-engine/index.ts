@@ -1,7 +1,8 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { loadProject, saveProject, computeDuration } from '../engine/project.js';
-import type { Project, VideoElement, ImageElement, TextElement, AudioElement } from '../types/schema.js';
+import { upsertAnimationKeyframe } from '../shared/animation-model.js';
+import type { Project, VideoElement, ImageElement, TextElement, AudioElement, CompositionElement } from '../types/schema.js';
 import { randomId } from '../utils/id.js';
 
 // ─── ProjectAPI type ────────────────────────────────────────────────────────
@@ -14,7 +15,7 @@ export interface AddVideoOpts {
 }
 
 export interface RegisterAssetOpts {
-  type: 'video' | 'image' | 'audio';
+  type: 'video' | 'image' | 'audio' | 'composition';
   src: string;
 }
 
@@ -22,6 +23,8 @@ export interface AddImageOpts {
   assetId: string;
   start: number;
   duration: number;
+  trimStart?: number;
+  trimDuration?: number;
 }
 
 export interface AddTextOpts {
@@ -37,7 +40,16 @@ export interface AddAudioOpts {
   start: number;
   duration: number;
   trimStart?: number;
+  trimDuration?: number;
   volume?: number;
+}
+
+export interface AddCompositionOpts {
+  id?: string;
+  assetId: string;
+  start: number;
+  duration: number;
+  trimStart?: number;
 }
 
 export interface SetKeyframeOpts {
@@ -56,6 +68,7 @@ export interface AddTrackOpts {
 export interface ProjectAPI {
   registerAsset(opts: RegisterAssetOpts): string;
   addVideo(opts: AddVideoOpts): string;
+  addComposition(opts: AddCompositionOpts): string;
   addImage(opts: AddImageOpts): string;
   addText(opts: AddTextOpts): string;
   addAudio(opts: AddAudioOpts): string;
@@ -95,6 +108,22 @@ function createAPI(project: Project, _root: string): ProjectAPI {
       return id;
     },
 
+    addComposition(opts: AddCompositionOpts): string {
+      const id = opts.id ?? `el_comp_${randomId(6)}`;
+      const el: CompositionElement = {
+        id,
+        type: 'composition',
+        assetId: opts.assetId,
+        start: opts.start,
+        duration: opts.duration,
+        trimStart: opts.trimStart ?? 0,
+        trimDuration: opts.duration,
+        transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
+      };
+      project.elements[id] = el;
+      return id;
+    },
+
     addImage(opts: AddImageOpts): string {
       const id = `el_image_${randomId(6)}`;
       const el: ImageElement = {
@@ -103,6 +132,8 @@ function createAPI(project: Project, _root: string): ProjectAPI {
         assetId: opts.assetId,
         start: opts.start,
         duration: opts.duration,
+        trimStart: opts.trimStart ?? 0,
+        trimDuration: opts.trimDuration ?? opts.duration,
         transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
       };
       project.elements[id] = el;
@@ -133,6 +164,7 @@ function createAPI(project: Project, _root: string): ProjectAPI {
         start: opts.start,
         duration: opts.duration,
         trimStart: opts.trimStart ?? 0,
+        trimDuration: opts.trimDuration ?? opts.duration,
         volume: opts.volume ?? 1,
         transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
       };
@@ -154,14 +186,13 @@ function createAPI(project: Project, _root: string): ProjectAPI {
     },
 
     setKeyframe(opts: SetKeyframeOpts): void {
-      const animId = `anim_${randomId(6)}`;
-      project.animations[animId] = {
-        id: animId,
+      upsertAnimationKeyframe(project, {
         target: opts.elementId,
         property: opts.property,
-        keyframes: [{ time: opts.time, value: opts.value }],
+        time: opts.time,
+        value: opts.value,
         easing: 'easeInOut',
-      };
+      });
     },
 
     addTrack(opts: AddTrackOpts): string {

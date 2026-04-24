@@ -1,12 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { api, type ProjectData } from '../lib/api';
+import { PROJECT_PATH } from '../lib/config';
 
 interface TheatrePanelProps {
   project: ProjectData | null;
   onUpdate?: () => void;
 }
-
-const PROJECT_PATH = 'D:\\Coding\\Projects\\cutboard\\project.json';
 
 export const TheatrePanel: React.FC<TheatrePanelProps> = ({ project, onUpdate }) => {
   const [selectedElement, setSelectedElement] = useState<string | null>(null);

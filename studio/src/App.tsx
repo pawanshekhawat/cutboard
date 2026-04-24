@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Canvas } from './components/Canvas';
 import { Timeline } from './components/Timeline';
+import { AssetManager } from './components/AssetManager';
 import { api, type ProjectData } from './lib/api';
+import { buildApiUrl } from './lib/config';
 import {
   applyExternalProjectToTheatre,
   enableTheatreWriteBack,
@@ -9,8 +11,6 @@ import {
   setTheatreTime,
 } from './lib/theatre-native';
 import './App.css';
-
-const PROJECT_PATH = 'D:\\Coding\\Projects\\cutboard\\project.json';
 
 function App() {
   const [project, setProject] = useState<ProjectData | null>(null);
@@ -27,7 +27,7 @@ function App() {
   // Load project
   const loadProject = useCallback(async () => {
     try {
-      const data = await api.getProject(PROJECT_PATH);
+      const data = await api.getProject();
       setProject(data);
       setIsConnected(true);
     } catch (error) {
@@ -63,7 +63,7 @@ function App() {
   useEffect(() => {
     if (didSseRef.current) return;
     didSseRef.current = true;
-    eventSourceRef.current = new EventSource('http://localhost:3001/api/stream');
+    eventSourceRef.current = new EventSource(buildApiUrl('/api/stream'));
 
     eventSourceRef.current.onopen = () => {
       console.log('SSE connected');
@@ -128,7 +128,7 @@ function App() {
   };
 
   return (
-    <div className="app">
+    <div className="app" style={{ height: '100vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <header style={{
         padding: '20px',
         backgroundColor: '#1a1a1a',
@@ -179,29 +179,35 @@ function App() {
       </header>
 
       <main style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '20px 40px 160px',
+        flex: 1,
+        minHeight: 0,
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) 300px',
+        columnGap: '0',
+        padding: '20px 0 20px 40px',
         backgroundColor: '#0f0f0f',
-        minHeight: 'calc(100vh - 80px)',
-        boxSizing: 'border-box'
+        boxSizing: 'border-box',
+        overflow: 'hidden',
       }}>
-        <Canvas
-          project={project}
-          currentTime={currentTime}
-          isProxyMode={isProxyMode}
-        />
+        <div style={{ minWidth: 0, paddingRight: '24px', overflow: 'auto' }}>
+          <Canvas
+            project={project}
+            currentTime={currentTime}
+            isProxyMode={isProxyMode}
+            isPlaying={isPlaying}
+          />
+        </div>
+        <AssetManager project={project} onProjectRefresh={loadProject} />
       </main>
 
-      <footer style={{ position: 'fixed', bottom: 0, left: 0, right: 0 }}>
+      <footer style={{ flexShrink: 0 }}>
         <Timeline
           project={project}
           currentTime={currentTime}
           onTimeChange={handleTimeChange}
           onPlayPause={handlePlayPause}
           isPlaying={isPlaying}
+          onProjectRefresh={loadProject}
         />
       </footer>
 

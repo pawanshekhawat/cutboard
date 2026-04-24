@@ -1,14 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProjectData } from '../lib/api';
+import { buildApiUrl } from '../lib/config';
 import { subscribeToTheatreElementValues } from '../lib/theatre-native';
+
+const VIDEO_SEEK_THRESHOLD_SECONDS = 0.08;
+const AUDIO_SEEK_THRESHOLD_SECONDS = 0.08;
 
 interface CanvasProps {
   project: ProjectData | null;
   currentTime: number;
   isProxyMode: boolean;
+  isPlaying: boolean;
 }
 
-export const Canvas: React.FC<CanvasProps> = ({ project, currentTime, isProxyMode }) => {
+export const Canvas: React.FC<CanvasProps> = ({ project, currentTime, isProxyMode, isPlaying }) => {
   const [liveTransforms, setLiveTransforms] = useState<
     Record<string, { x: number; y: number; scale: number; rotation: number; opacity: number }>
   >({});
@@ -18,6 +23,8 @@ export const Canvas: React.FC<CanvasProps> = ({ project, currentTime, isProxyMod
   const [proxyError, setProxyError] = useState<string | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
+  const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
+  const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
 
   // Subscribe to Theatre object values so React re-renders live while dragging/scrubbing.
   useEffect(() => {
@@ -79,7 +86,7 @@ export const Canvas: React.FC<CanvasProps> = ({ project, currentTime, isProxyMod
       try {
         setIsProxyLoading(true);
         setProxyError(null);
-        const res = await fetch(`http://localhost:3001/api/project/frame?time=${encodeURIComponent(debouncedTime)}`, {
+        const res = await fetch(buildApiUrl(`/api/project/frame?time=${encodeURIComponent(debouncedTime)}`), {
           signal: controller.signal,
           cache: 'no-store',
         });
@@ -132,9 +139,70 @@ export const Canvas: React.FC<CanvasProps> = ({ project, currentTime, isProxyMod
   }, [project, currentTime]);
 
   const visualElements = useMemo(
-    () => elements.filter((el) => el.type !== 'audio'),
+    // In DOM mode, we only render primitive layers. Compositions are shown via Proxy mode.
+    () => elements.filter((el) => el.type !== 'audio' && el.type !== 'composition'),
     [elements]
   );
+  const audioElements = useMemo(
+    () => elements.filter((el) => el.type === 'audio' && !!el.assetId) as Array<ProjectData['elements'][string]>,
+    [elements]
+  );
+
+  useEffect(() => {
+    if (!project || isProxyMode) return;
+    const activeVideoElements = visualElements.filter((el) => el.type === 'video') as Array<ProjectData['elements'][string]>;
+    for (const el of activeVideoElements) {
+      const video = videoRefs.current[el.id];
+      if (!video) continue;
+
+      const trimStart = Number((el as any).trimStart) || 0;
+      const relative = currentTime - el.start;
+      const targetTime = Math.max(0, relative + trimStart);
+
+      if (Math.abs((video.currentTime || 0) - targetTime) > VIDEO_SEEK_THRESHOLD_SECONDS) {
+        try {
+          video.currentTime = targetTime;
+        } catch {
+          // Ignore transient seek errors while metadata is still loading.
+        }
+      }
+
+      if (isPlaying) {
+        void video.play().catch(() => {});
+      } else {
+        video.pause();
+      }
+    }
+  }, [project, isProxyMode, visualElements, currentTime, isPlaying]);
+
+  useEffect(() => {
+    if (!project || isProxyMode) return;
+    for (const el of audioElements) {
+      const audio = audioRefs.current[el.id];
+      if (!audio) continue;
+
+      const trimStart = Number(el.trimStart) || 0;
+      const targetTime = Math.max(0, (currentTime - el.start) + trimStart);
+      const volume = Math.max(0, Math.min(1, Number(el.volume ?? 1)));
+
+      audio.volume = volume;
+
+      if (Math.abs((audio.currentTime || 0) - targetTime) > AUDIO_SEEK_THRESHOLD_SECONDS) {
+        try {
+          audio.currentTime = targetTime;
+        } catch {
+          // Ignore transient seek errors while metadata is still loading.
+        }
+      }
+
+      const isInClip = currentTime >= el.start && currentTime < el.start + el.duration;
+      if (isPlaying && isInClip) {
+        void audio.play().catch(() => {});
+      } else {
+        audio.pause();
+      }
+    }
+  }, [project, isProxyMode, audioElements, currentTime, isPlaying]);
 
   const computeTransform = (element: ProjectData['elements'][string]) => {
     // Theatre subscription (preferred): React state drives DOM updates.
@@ -257,6 +325,17 @@ export const Canvas: React.FC<CanvasProps> = ({ project, currentTime, isProxyMod
               transform: `scale(${stageScale})`,
             }}
           >
+            {audioElements.map((el) => (
+              <audio
+                key={`audio-${el.id}`}
+                ref={(node) => {
+                  audioRefs.current[el.id] = node;
+                }}
+                src={buildApiUrl(`/${el.assetId}`)}
+                preload="metadata"
+                style={{ display: 'none' }}
+              />
+            ))}
             {visualElements.map(el => {
               const transform = computeTransform(el);
               
@@ -285,7 +364,7 @@ export const Canvas: React.FC<CanvasProps> = ({ project, currentTime, isProxyMod
                 return (
                   <img
                     key={el.id}
-                    src={`http://localhost:3001/${el.assetId}`}
+                    src={buildApiUrl(`/${el.assetId}`)}
                     alt=""
                     style={{ ...style, maxWidth: '100%', maxHeight: '100%' }}
                   />
@@ -296,11 +375,13 @@ export const Canvas: React.FC<CanvasProps> = ({ project, currentTime, isProxyMod
                 return (
                   <video
                     key={el.id}
-                    src={`http://localhost:3001/${el.assetId}`}
+                    ref={(node) => {
+                      videoRefs.current[el.id] = node;
+                    }}
+                    src={buildApiUrl(`/${el.assetId}`)}
                     style={{ ...style, maxWidth: '100%', maxHeight: '100%' }}
                     muted
-                    loop
-                    autoPlay
+                    playsInline
                   />
                 );
               }
