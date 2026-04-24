@@ -232,6 +232,26 @@ project.setKeyframe('title', 'transform.x', 3, 500);
 await project.render('output.mp4');
 ```
 
+## Nested compositions (pre-comps)
+
+CutBoard supports an asset type `composition` that points at another CutBoard project (a folder containing a `project.json`, or a direct path to a `project.json`). At render time and in Studio **Proxy** mode, referenced child compositions are pre-rendered into deterministic cache files under `output/.cache/compositions/` and then treated like regular video inputs in the parent timeline.
+
+### Fixtures
+
+- **Child**: `test-project/nested-child/project.json`
+- **Parent**: `test-project/nested-parent/project.json` (references the child as a `composition` asset)
+
+### Verify render + proxy parity
+
+```bash
+# Render the parent fixture (from repo root)
+cutboard render --path "test-project/nested-parent/project.json" --output "output/nested-parent.mp4"
+
+# Start server + studio, then enable Proxy mode in the Studio UI and scrub t=1..5s
+# The first proxy frame request will (re)build the child cache under:
+#   output/.cache/compositions/
+```
+
 ## Theatre.js Integration
 
 The Studio UI uses Theatre.js for professional timeline editing:

@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "meta": {
+    "name": "Nested Parent",
+    "fps": 30,
+    "resolution": { "width": 1920, "height": 1080 },
+    "duration": 6
+  },
+  "assets": {
+    "nested-child": {
+      "type": "composition",
+      "src": "../nested-child"
+    }
+  },
+  "tracks": [],
+  "elements": {
+    "el_parent_comp": {
+      "id": "el_parent_comp",
+      "type": "composition",
+      "assetId": "nested-child",
+      "start": 1,
+      "duration": 4,
+      "trimStart": 0,
+      "trimDuration": 4,
+      "transform": { "x": 0, "y": 0, "scale": 1, "rotation": 0, "opacity": 1 }
+    },
+    "el_parent_text": {
+      "id": "el_parent_text",
+      "type": "text",
+      "content": "parent overlay",
+      "style": { "fontSize": 64, "color": "#ffffff" },
+      "start": 0,
+      "duration": 6,
+      "transform": { "x": 200, "y": 900, "scale": 1, "rotation": 0, "opacity": 1 }
+    }
+  },
+  "animations": {},
+  "effects": {}
+}
+

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { ProjectData } from '../lib/api';
+import type { AddElementPayload, ProjectData } from '../lib/api';
 import { api } from '../lib/api';
 import { PROJECT_PATH } from '../lib/config';
 import { lockElement, unlockElement } from '../lib/theatre-sync';
@@ -32,6 +32,23 @@ type MoveDragState = {
   oldStart: number;
 };
 
+type AssetDragPayload = {
+  assetId: string;
+  type: 'video' | 'image' | 'audio' | 'composition';
+  src?: string;
+};
+
+type TrackDragState = {
+  fromIndex: number;
+};
+
+type TimelineTrack = {
+  id: string;
+  type: 'video' | 'audio';
+  elements: string[];
+  isVirtual?: boolean;
+};
+
 interface TimelineProps {
   project: ProjectData | null;
   currentTime: number;
@@ -51,6 +68,14 @@ export const Timeline: React.FC<TimelineProps> = ({
 }) => {
   if (!project) return null;
 
+  const HANDLE_LANE_PX = 22;
+
+  const [contextMenu, setContextMenu] = useState<{
+    elementId: string;
+    clientX: number;
+    clientY: number;
+  } | null>(null);
+
   const duration = project.meta.duration;
   const fps = Number(project.meta.fps) || 30;
   const minDuration = fps > 0 ? 1 / fps : 0.01;
@@ -65,6 +90,22 @@ export const Timeline: React.FC<TimelineProps> = ({
   const moveDragRef = useRef<MoveDragState | null>(null);
   const [pendingEdits, setPendingEdits] = useState<Record<string, PendingTimingPatch>>({});
   const pendingEditsRef = useRef<Record<string, PendingTimingPatch>>({});
+  const [isDropOver, setIsDropOver] = useState(false);
+  const trackDragRef = useRef<TrackDragState | null>(null);
+  const [trackDropIndex, setTrackDropIndex] = useState<number | null>(null);
+
+  const timelineTracks: TimelineTrack[] = useMemo(() => {
+    if (project.tracks.length > 0) {
+      return project.tracks.map((t) => ({ id: t.id, type: t.type, elements: [...t.elements] }));
+    }
+    // Legacy projects may have no tracks. Synthesize one row per element so UI is still interactive.
+    return Object.values(project.elements).map((el) => ({
+      id: `track_${el.id}`,
+      type: el.type === 'audio' ? 'audio' : 'video',
+      elements: [el.id],
+      isVirtual: true,
+    }));
+  }, [project.tracks, project.elements]);
 
   const getElementWithPending = (elementId: string) => {
     const base = project.elements[elementId];
@@ -120,7 +161,19 @@ export const Timeline: React.FC<TimelineProps> = ({
           if (!inflight) {
             inflight = api
               .getAudioWaveform(PROJECT_PATH, { assetId: element.assetId, samples: 512 })
-              .then((res) => res.peaks || [])
+              .then((res: any) => {
+                const candidates = [
+                  res?.peaks,
+                  res?.data?.peaks,
+                  res?.waveform?.peaks,
+                ];
+                const raw = candidates.find((c) => Array.isArray(c));
+                if (!Array.isArray(raw)) return [];
+                return raw
+                  .map((v: unknown) => Number(v))
+                  .filter((v: number) => Number.isFinite(v))
+                  .map((v: number) => clamp(v, 0, 1));
+              })
               .finally(() => {
                 delete waveformInflightRef.current[cacheKey];
               });
@@ -145,36 +198,45 @@ export const Timeline: React.FC<TimelineProps> = ({
     }, [element.assetId]);
 
     const sourceDuration = useMemo(() => Math.max(assetDuration, clipDuration), [assetDuration, clipDuration]);
+    const safePeaks = useMemo(
+      () => (Array.isArray(peaks) ? peaks.filter((v) => typeof v === 'number' && Number.isFinite(v)) : []),
+      [peaks]
+    );
 
     const waveformPaths = useMemo(() => {
-      if (!peaks || peaks.length === 0) return null;
+      if (!Array.isArray(safePeaks) || safePeaks.length === 0) return null;
       if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) return null;
 
       // Build waveform in source-time coordinates so trimming is a moving window,
       // not a stretch/squish transform of a pre-windowed path.
-      const top = peaks
+      const top = safePeaks
         .map((p, i) => {
-          const t = peaks.length > 1 ? (i / (peaks.length - 1)) * sourceDuration : 0;
+          const t = safePeaks.length > 1 ? (i / (safePeaks.length - 1)) * sourceDuration : 0;
           const y = 50 - clamp(p, 0, 1) * 45;
           return `${t},${y}`;
         })
         .join(' ');
 
-      const bottom = peaks
+      const bottom = safePeaks
         .map((p, i) => {
-          const t = peaks.length > 1 ? (i / (peaks.length - 1)) * sourceDuration : 0;
+          const t = safePeaks.length > 1 ? (i / (safePeaks.length - 1)) * sourceDuration : 0;
           const y = 50 + clamp(p, 0, 1) * 45;
           return `${t},${y}`;
         })
         .join(' ');
 
       return { top, bottom };
-    }, [peaks, sourceDuration]);
+    }, [safePeaks, sourceDuration]);
 
-    if (isLoading && !peaks) {
+    if (isLoading && (!Array.isArray(peaks) || peaks.length === 0)) {
       return <div style={{ position: 'absolute', inset: '2px 10px', opacity: 0.25, fontSize: '10px' }}>loading waveform...</div>;
     }
-    if (hasError && !peaks) return null;
+    if (hasError && (!Array.isArray(peaks) || peaks.length === 0)) {
+      return <div style={{ position: 'absolute', inset: '2px 10px', opacity: 0.2, fontSize: '10px' }}>waveform unavailable</div>;
+    }
+    if (!Array.isArray(peaks)) {
+      return <div style={{ position: 'absolute', inset: '2px 10px', opacity: 0.2, fontSize: '10px' }}>waveform unavailable</div>;
+    }
     if (!waveformPaths) return null;
 
     const viewStart = clamp(trimStart, 0, Math.max(sourceDuration - minDuration, 0));
@@ -458,6 +520,141 @@ export const Timeline: React.FC<TimelineProps> = ({
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const createElementFromAsset = (
+    asset: AssetDragPayload,
+    start: number
+  ): AddElementPayload => {
+    const assetMeta = project.assets?.[asset.assetId];
+    const fallbackDuration = 5;
+    const safeDuration = Math.max(
+      minDuration,
+      Number.isFinite(Number(assetMeta?.duration)) && Number(assetMeta?.duration) > 0
+        ? Number(assetMeta?.duration)
+        : fallbackDuration
+    );
+    const id = `el_${asset.type}_${Math.random().toString(36).slice(2, 8)}`;
+    const base = {
+      id,
+      start,
+      duration: safeDuration,
+      transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
+    };
+
+    if (asset.type === 'video') {
+      return {
+        ...base,
+        type: 'video',
+        assetId: asset.assetId,
+        trimStart: 0,
+        trimDuration: safeDuration,
+      };
+    }
+    if (asset.type === 'audio') {
+      return {
+        ...base,
+        type: 'audio',
+        assetId: asset.assetId,
+        trimStart: 0,
+        volume: 1,
+      };
+    }
+    if (asset.type === 'composition') {
+      return {
+        ...base,
+        type: 'composition',
+        assetId: asset.assetId,
+        trimStart: 0,
+        trimDuration: safeDuration,
+      };
+    }
+    return {
+      ...base,
+      type: 'image',
+      assetId: asset.assetId,
+    };
+  };
+
+  const handleAssetDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (!event.dataTransfer.types.includes('application/x-cutboard-asset')) return;
+    setIsDropOver(false);
+    if (!timelineRef.current) return;
+
+    const raw = event.dataTransfer.getData('application/x-cutboard-asset');
+    if (!raw) return;
+
+    let payload: AssetDragPayload | null = null;
+    try {
+      payload = JSON.parse(raw) as AssetDragPayload;
+    } catch {
+      payload = null;
+    }
+    if (!payload?.assetId || !payload?.type) return;
+
+    const rect = timelineRef.current.getBoundingClientRect();
+    const clampedX = clamp(event.clientX - rect.left, 0, rect.width);
+    const start = clamp((clampedX / Math.max(rect.width, 1)) * duration, 0, Number.POSITIVE_INFINITY);
+
+    const yInTracks = event.clientY - rect.top - rulerHeight;
+    const targetTrackIndex = clamp(Math.floor(yInTracks / trackHeight), 0, Math.max(timelineTracks.length - 1, 0));
+    const targetTrack = timelineTracks[targetTrackIndex];
+    const targetTrackId = targetTrack?.isVirtual
+      ? `track_${payload.type === 'audio' ? 'audio' : 'video'}_${Math.random().toString(36).slice(2, 6)}`
+      : targetTrack?.id;
+    if (!targetTrackId) return;
+
+    try {
+      const element = createElementFromAsset(payload, start);
+      await api.createProjectElement(PROJECT_PATH, element, targetTrackId);
+      await Promise.resolve(onProjectRefresh?.());
+    } catch (err) {
+      console.error('Failed to add dropped asset to timeline:', err);
+    }
+  };
+
+  const reorderTracks = async (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
+    if (fromIndex < 0 || toIndex < 0) return;
+    if (timelineTracks.length < 2) return;
+    const nextTrackIds = [...timelineTracks.map((t) => t.id)];
+    const [moved] = nextTrackIds.splice(fromIndex, 1);
+    nextTrackIds.splice(toIndex, 0, moved);
+    try {
+      await api.reorderTracks(PROJECT_PATH, nextTrackIds);
+      await Promise.resolve(onProjectRefresh?.());
+    } catch (err) {
+      console.error('Failed to reorder tracks:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    const onPointerDown = () => setContextMenu(null);
+    const onScroll = () => setContextMenu(null);
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [contextMenu]);
+
+  const deleteElement = async (elementId: string) => {
+    try {
+      await api.deleteProjectElement(PROJECT_PATH, elementId);
+      await Promise.resolve(onProjectRefresh?.());
+    } catch (err) {
+      console.error('Failed to delete element:', err);
+    }
+  };
+
   return (
     <div style={{ padding: '20px', backgroundColor: '#1a1a1a', color: '#fff' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '20px', marginBottom: '20px' }}>
@@ -482,11 +679,25 @@ export const Timeline: React.FC<TimelineProps> = ({
       </div>
 
       <div
+        onDragOver={(event) => {
+          event.preventDefault();
+          if (event.dataTransfer.types.includes('application/x-cutboard-asset')) {
+            event.dataTransfer.dropEffect = 'copy';
+            setIsDropOver(true);
+          }
+        }}
+        onContextMenu={(e) => {
+          // Disable the browser context menu anywhere over the timeline area.
+          e.preventDefault();
+        }}
+        onDragLeave={() => setIsDropOver(false)}
+        onDrop={handleAssetDrop}
         style={{
           maxHeight: `${timelineViewportHeight}px`,
           overflowY: 'auto',
-          backgroundColor: '#2a2a2a',
+          backgroundColor: isDropOver ? '#34495e' : '#2a2a2a',
           borderRadius: '4px',
+          transition: 'background-color 120ms ease',
         }}
       >
         <div ref={timelineRef} style={{ position: 'relative', height: `${timelineInnerHeight}px` }}>
@@ -526,194 +737,209 @@ export const Timeline: React.FC<TimelineProps> = ({
 
           {/* Track visualization */}
           <div style={{ position: 'absolute', top: `${rulerHeight}px`, left: 0, right: 0, height: `${trackCount * trackHeight}px` }}>
-            {project.tracks.length > 0 ? (
-              project.tracks.map((track, trackIndex) => (
+            {timelineTracks.length > 0 ? (
+              timelineTracks.map((track, trackIndex) => (
                 <div
                   key={track.id}
+                  onDragOver={(e) => {
+                    if (!e.dataTransfer.types.includes('application/x-cutboard-track')) return;
+                    e.preventDefault();
+                    setTrackDropIndex(trackIndex);
+                  }}
+                  onDrop={(e) => {
+                    if (!e.dataTransfer.types.includes('application/x-cutboard-track')) return;
+                    e.preventDefault();
+                    const drag = trackDragRef.current;
+                    trackDragRef.current = null;
+                    setTrackDropIndex(null);
+                    if (!drag) return;
+                    void reorderTracks(drag.fromIndex, trackIndex);
+                  }}
                   style={{
                     position: 'absolute',
                     top: `${trackIndex * trackHeight}px`,
                     left: 0,
                     right: 0,
                     height: '28px',
-                    backgroundColor: '#333',
-                    marginBottom: '2px'
+                    backgroundColor: trackDropIndex === trackIndex ? '#3d4f62' : '#333',
+                    marginBottom: '2px',
+                    display: 'flex',
+                    alignItems: 'stretch',
                   }}
                 >
-                  {track.elements.map(elementId => {
-                    const element = getElementWithPending(elementId);
-                    if (!element) return null;
-                    const isLeftTrimmable = element.type === 'video' || element.type === 'audio' || element.type === 'composition' || element.type === 'text';
-                    const isRightTrimmable = isLeftTrimmable || element.type === 'text';
-
-                    return (
-                      <div
-                        key={element.id}
-                        onPointerDown={(e) => startBodyDrag(e, element.id)}
-                        style={{
-                          position: 'absolute',
-                          left: `${(element.start / duration) * 100}%`,
-                          width: `${(element.duration / duration) * 100}%`,
-                          height: '100%',
-                          backgroundColor: element.type === 'text' ? '#3498db' : 
-                                          element.type === 'video' ? '#e74c3c' : 
-                                          element.type === 'image' ? '#f39c12' :
-                                          element.type === 'composition' ? '#1abc9c' : '#9b59b6',
-                          borderRadius: '4px',
-                          padding: '4px 8px',
-                          fontSize: '12px',
-                          color: '#fff',
-                          overflow: 'hidden',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          cursor: 'grab'
-                        }}
-                      >
-                        {(isLeftTrimmable || isRightTrimmable) && (
-                          <>
-                            {isLeftTrimmable && (
-                              <div
-                                onPointerDown={(e) => {
-                                  e.stopPropagation();
-                                  startTrimDrag(e, element.id, 'left');
-                                }}
-                                style={{
-                                  position: 'absolute',
-                                  left: 0,
-                                  top: 0,
-                                  bottom: 0,
-                                  width: '8px',
-                                  cursor: 'ew-resize',
-                                  background: 'rgba(0,0,0,0.25)',
-                                }}
-                                onClick={(ev) => ev.stopPropagation()}
-                              />
-                            )}
-                            {isRightTrimmable && (
-                              <div
-                                onPointerDown={(e) => {
-                                  e.stopPropagation();
-                                  startTrimDrag(e, element.id, 'right');
-                                }}
-                                style={{
-                                  position: 'absolute',
-                                  right: 0,
-                                  top: 0,
-                                  bottom: 0,
-                                  width: '8px',
-                                  cursor: 'ew-resize',
-                                  background: 'rgba(0,0,0,0.25)',
-                                }}
-                                onClick={(ev) => ev.stopPropagation()}
-                              />
-                            )}
-                          </>
-                        )}
-                        {element.type === 'text'
-                          ? element.content
-                          : element.type === 'composition'
-                            ? `comp: ${(element.assetId || '').split('/').pop()}`
-                            : element.assetId?.split('/').pop()}
-                        {element.type === 'audio' && <AudioWaveform element={element} />}
-                      </div>
-                    );
-                  })}
-                </div>
-              ))
-            ) : (
-              // Fallback: show all elements as tracks if no tracks defined
-              Object.values(project.elements).map((element, idx) => (
-                <div
-                  key={element.id}
-                  style={{
-                    position: 'absolute',
-                    top: `${idx * trackHeight}px`,
-                    left: 0,
-                    right: 0,
-                    height: '28px',
-                    backgroundColor: '#333',
-                    marginBottom: '2px'
-                  }}
-                >
-                  {(() => {
-                    const merged = getElementWithPending(element.id) ?? element;
-                    const isLeftTrimmable = merged.type === 'video' || merged.type === 'audio' || merged.type === 'composition' || merged.type === 'text';
-                    const isRightTrimmable = isLeftTrimmable || merged.type === 'text';
-                    return (
                   <div
-                    onPointerDown={(e) => startBodyDrag(e, merged.id)}
-                    style={{
-                      position: 'absolute',
-                      left: `${(merged.start / duration) * 100}%`,
-                      width: `${(merged.duration / duration) * 100}%`,
-                      height: '100%',
-                      backgroundColor: merged.type === 'text' ? '#3498db' : 
-                                      merged.type === 'video' ? '#e74c3c' : 
-                                      merged.type === 'image' ? '#f39c12' :
-                                      merged.type === 'composition' ? '#1abc9c' : '#9b59b6',
-                      borderRadius: '4px',
-                      padding: '4px 8px',
-                      fontSize: '12px',
-                      color: '#fff',
-                      overflow: 'hidden',
-                      whiteSpace: 'nowrap',
-                      textOverflow: 'ellipsis',
-                      cursor: 'grab'
+                    draggable
+                    onDragStart={(e) => {
+                      trackDragRef.current = { fromIndex: trackIndex };
+                      e.dataTransfer.setData('application/x-cutboard-track', String(trackIndex));
+                      e.dataTransfer.effectAllowed = 'move';
                     }}
+                    onDragEnd={() => {
+                      trackDragRef.current = null;
+                      setTrackDropIndex(null);
+                    }}
+                    style={{
+                      width: `${HANDLE_LANE_PX}px`,
+                      flex: `0 0 ${HANDLE_LANE_PX}px`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#ffffff',
+                      fontWeight: 700,
+                      cursor: 'grab',
+                      background: 'rgba(0,0,0,0.35)',
+                      borderRight: '1px solid rgba(255,255,255,0.12)',
+                      userSelect: 'none',
+                    }}
+                    title="Drag to reorder track"
                   >
-                    {(isLeftTrimmable || isRightTrimmable) && (
-                      <>
-                        {isLeftTrimmable && (
-                          <div
-                            onPointerDown={(e) => {
-                              e.stopPropagation();
-                              startTrimDrag(e, merged.id, 'left');
-                            }}
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: '8px',
-                              cursor: 'ew-resize',
-                              background: 'rgba(0,0,0,0.25)',
-                            }}
-                            onClick={(ev) => ev.stopPropagation()}
-                          />
-                        )}
-                        {isRightTrimmable && (
-                          <div
-                            onPointerDown={(e) => {
-                              e.stopPropagation();
-                              startTrimDrag(e, merged.id, 'right');
-                            }}
-                            style={{
-                              position: 'absolute',
-                              right: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: '8px',
-                              cursor: 'ew-resize',
-                              background: 'rgba(0,0,0,0.25)',
-                            }}
-                            onClick={(ev) => ev.stopPropagation()}
-                          />
-                        )}
-                      </>
-                    )}
-                    {merged.type === 'text'
-                      ? merged.content
-                      : merged.type === 'composition'
-                        ? `comp: ${(merged.assetId || '').split('/').pop()}`
-                        : merged.assetId?.split('/').pop()}
-                    {merged.type === 'audio' && <AudioWaveform element={merged} />}
+                    ::
                   </div>
-                    );
-                  })()}
+                  <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+                    {track.elements.map((elementId) => {
+                      const element = getElementWithPending(elementId);
+                      if (!element) return null;
+                      const isLeftTrimmable = element.type === 'video' || element.type === 'audio' || element.type === 'composition' || element.type === 'text';
+                      const isRightTrimmable = isLeftTrimmable || element.type === 'text';
+
+                      return (
+                        <div
+                          key={element.id}
+                          onPointerDown={(e) => startBodyDrag(e, element.id)}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setContextMenu({
+                              elementId: element.id,
+                              clientX: e.clientX,
+                              clientY: e.clientY,
+                            });
+                          }}
+                          style={{
+                            position: 'absolute',
+                            left: `${(element.start / duration) * 100}%`,
+                            width: `${(element.duration / duration) * 100}%`,
+                            height: '100%',
+                            backgroundColor: element.type === 'text' ? '#3498db' :
+                                            element.type === 'video' ? '#e74c3c' :
+                                            element.type === 'image' ? '#f39c12' :
+                                            element.type === 'composition' ? '#1abc9c' : '#9b59b6',
+                            borderRadius: '4px',
+                            padding: '4px 8px',
+                            fontSize: '12px',
+                            color: '#fff',
+                            overflow: 'hidden',
+                            whiteSpace: 'nowrap',
+                            textOverflow: 'ellipsis',
+                            cursor: 'grab',
+                            zIndex: 1
+                          }}
+                        >
+                          {(isLeftTrimmable || isRightTrimmable) && (
+                            <>
+                              {isLeftTrimmable && (
+                                <div
+                                  onPointerDown={(e) => {
+                                    e.stopPropagation();
+                                    startTrimDrag(e, element.id, 'left');
+                                  }}
+                                  style={{
+                                    position: 'absolute',
+                                    left: 0,
+                                    top: 0,
+                                    bottom: 0,
+                                    width: '8px',
+                                    cursor: 'ew-resize',
+                                    background: 'rgba(0,0,0,0.25)',
+                                  }}
+                                  onClick={(ev) => ev.stopPropagation()}
+                                />
+                              )}
+                              {isRightTrimmable && (
+                                <div
+                                  onPointerDown={(e) => {
+                                    e.stopPropagation();
+                                    startTrimDrag(e, element.id, 'right');
+                                  }}
+                                  style={{
+                                    position: 'absolute',
+                                    right: 0,
+                                    top: 0,
+                                    bottom: 0,
+                                    width: '8px',
+                                    cursor: 'ew-resize',
+                                    background: 'rgba(0,0,0,0.25)',
+                                  }}
+                                  onClick={(ev) => ev.stopPropagation()}
+                                />
+                              )}
+                            </>
+                          )}
+                          {element.type === 'text'
+                            ? element.content
+                            : element.type === 'composition'
+                              ? `comp: ${(element.assetId || '').split('/').pop()}`
+                              : element.assetId?.split('/').pop()}
+                          {element.type === 'audio' && <AudioWaveform element={element} />}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               ))
-            )}
+            ) : null}
           </div>
+
+          {contextMenu && (
+            <div
+              style={{
+                position: 'fixed',
+                left: contextMenu.clientX,
+                top: contextMenu.clientY,
+                zIndex: 9999,
+                background: '#111',
+                border: '1px solid rgba(255,255,255,0.15)',
+                borderRadius: '8px',
+                boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+                padding: '6px',
+                minWidth: '180px',
+              }}
+              onContextMenu={(e) => e.preventDefault()}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => {
+                  const id = contextMenu.elementId;
+                  setContextMenu(null);
+                  void deleteElement(id);
+                }}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '12px',
+                  padding: '8px 10px',
+                  background: 'transparent',
+                  border: 'none',
+                  borderRadius: '6px',
+                  color: '#ff6b6b',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  textAlign: 'left',
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.06)';
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+                }}
+              >
+                <span>Delete clip</span>
+                <span style={{ opacity: 0.6, fontSize: '12px' }}>Del</span>
+              </button>
+            </div>
+          )}
 
           {/* Playhead */}
           <div

@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, statSync } from 'fs';
+import * as fsp from 'fs/promises';
 import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { SCHEMA_VERSION, type Project } from '../types/schema.js';
@@ -21,6 +22,15 @@ function loadAndNormalizeProject(path: string): Project {
   return validateProject(normalized.project);
 }
 
+async function loadAndNormalizeProjectAsync(path: string): Promise<Project> {
+  const raw = JSON.parse(await fsp.readFile(path, 'utf-8'));
+  const normalized = normalizeProjectContract(raw);
+  if (normalized.changed) {
+    await fsp.writeFile(path, JSON.stringify(normalized.project, null, 2), 'utf-8');
+  }
+  return validateProject(normalized.project);
+}
+
 // ─── Load / Save ───────────────────────────────────────────────────────────
 export function loadProject(root = '.'): Project {
   const path = resolve(root, PROJECT_FILE);
@@ -30,10 +40,24 @@ export function loadProject(root = '.'): Project {
   return loadAndNormalizeProject(path);
 }
 
+export async function loadProjectAsync(root = '.'): Promise<Project> {
+  const path = resolve(root, PROJECT_FILE);
+  if (!existsSync(path)) {
+    throw new Error(`No project.json found at ${path}. Run "cutboard init" first.`);
+  }
+  return loadAndNormalizeProjectAsync(path);
+}
+
 export function loadProjectFromPath(projectJsonPath: string): Project {
   const path = resolve(projectJsonPath);
   if (!existsSync(path)) throw new Error(`No project.json found at ${path}`);
   return loadAndNormalizeProject(path);
+}
+
+export async function loadProjectFromPathAsync(projectJsonPath: string): Promise<Project> {
+  const path = resolve(projectJsonPath);
+  if (!existsSync(path)) throw new Error(`No project.json found at ${path}`);
+  return loadAndNormalizeProjectAsync(path);
 }
 
 export function resolveProjectRootFromSrc(parentRoot: string, src: string): string {
@@ -50,6 +74,11 @@ export function resolveProjectRootFromSrc(parentRoot: string, src: string): stri
 export function saveProject(project: Project, root = '.'): void {
   const path = resolve(root, PROJECT_FILE);
   writeFileSync(path, JSON.stringify(project, null, 2), 'utf-8');
+}
+
+export async function saveProjectAsync(project: Project, root = '.'): Promise<void> {
+  const path = resolve(root, PROJECT_FILE);
+  await fsp.writeFile(path, JSON.stringify(project, null, 2), 'utf-8');
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────

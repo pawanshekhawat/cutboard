@@ -1,9 +1,10 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { api, type ProjectData } from '../lib/api';
+import { api, type AddElementPayload, type ProjectData } from '../lib/api';
 import { PROJECT_PATH } from '../lib/config';
 
 interface AssetManagerProps {
   project: ProjectData | null;
+  currentTime: number;
   onProjectRefresh?: () => Promise<void> | void;
 }
 
@@ -20,7 +21,7 @@ function basename(src: string): string {
   return parts[parts.length - 1] || src;
 }
 
-export const AssetManager: React.FC<AssetManagerProps> = ({ project, onProjectRefresh }) => {
+export const AssetManager: React.FC<AssetManagerProps> = ({ project, currentTime, onProjectRefresh }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -30,6 +31,51 @@ export const AssetManager: React.FC<AssetManagerProps> = ({ project, onProjectRe
     if (!project) return [];
     return Object.entries(project.assets || {}).map(([assetId, asset]) => ({ assetId, ...asset }));
   }, [project]);
+
+  const createElementPayload = (
+    assetId: string,
+    assetType: 'video' | 'image' | 'audio' | 'composition'
+  ): AddElementPayload => {
+    const assetMeta = project?.assets?.[assetId];
+    const fallbackDuration = 5;
+    const safeDuration = Math.max(
+      1 / 30,
+      Number.isFinite(Number(assetMeta?.duration)) && Number(assetMeta?.duration) > 0
+        ? Number(assetMeta?.duration)
+        : fallbackDuration
+    );
+    const id = `el_${assetType}_${Math.random().toString(36).slice(2, 8)}`;
+    const base = {
+      id,
+      start: Math.max(0, Number(currentTime) || 0),
+      duration: safeDuration,
+      transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
+    };
+
+    if (assetType === 'video') {
+      return { ...base, type: 'video', assetId, trimStart: 0, trimDuration: safeDuration };
+    }
+    if (assetType === 'audio') {
+      return { ...base, type: 'audio', assetId, trimStart: 0, volume: 1 };
+    }
+    if (assetType === 'composition') {
+      return { ...base, type: 'composition', assetId, trimStart: 0, trimDuration: safeDuration };
+    }
+    return { ...base, type: 'image', assetId };
+  };
+
+  const handleAddToTimeline = async (assetId: string, assetType: 'video' | 'image' | 'audio' | 'composition') => {
+    if (!project) return;
+    try {
+      // Always create a new track row for each added asset so clips don't overlap in the same lane.
+      const preferredTrackId = `track_${assetType}_${Math.random().toString(36).slice(2, 8)}`;
+      const element = createElementPayload(assetId, assetType);
+      await api.createProjectElement(PROJECT_PATH, element, preferredTrackId);
+      await Promise.resolve(onProjectRefresh?.());
+    } catch (error: any) {
+      setUploadError(error?.response?.data?.error || error?.message || 'Failed to add asset to timeline');
+    }
+  };
 
   const handleUpload = async (file: File | null | undefined) => {
     if (!file) return;
@@ -134,6 +180,9 @@ export const AssetManager: React.FC<AssetManagerProps> = ({ project, onProjectRe
           <div
             key={asset.assetId}
             draggable
+            onClick={() => {
+              void handleAddToTimeline(asset.assetId, asset.type);
+            }}
             onDragStart={(e) => {
               const payload = JSON.stringify({
                 assetId: asset.assetId,
@@ -152,7 +201,7 @@ export const AssetManager: React.FC<AssetManagerProps> = ({ project, onProjectRe
               cursor: 'grab',
               userSelect: 'none',
             }}
-            title="Drag to timeline"
+            title="Click to add to timeline or drag"
           >
             <div style={{ fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
               <span>{iconByType[asset.type] || '📦'}</span>

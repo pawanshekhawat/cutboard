@@ -2,18 +2,19 @@
 
 import Fastify from 'fastify';
 import { join, resolve, dirname, basename, extname, relative } from 'path';
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, createWriteStream, unlinkSync } from 'fs';
+import { existsSync, statSync, mkdirSync, createWriteStream, unlinkSync } from 'fs';
+import * as fsp from 'fs/promises';
 import chokidar from 'chokidar';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import multipart from '@fastify/multipart';
-import { spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import { createHash } from 'crypto';
 import type { CompositionAsset, EasingType, Project } from '../types/schema.js';
 import { render } from '../engine/render.js';
-import { loadProject, resolveProjectRootFromSrc, computeDuration } from '../engine/project.js';
+import { resolveProjectRootFromSrc, computeDuration } from '../engine/project.js';
 import { upsertAnimationKeyframe } from '../shared/animation-model.js';
 import { normalizeProjectContract } from '../shared/project-contract.js';
 import { pipeline } from 'stream/promises';
@@ -28,6 +29,8 @@ const CORS_ORIGINS = (process.env.CUTBOARD_CORS_ORIGINS || 'http://localhost:517
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+const FRAME_CACHE_TTL_MS = Number(process.env.CUTBOARD_FRAME_CACHE_TTL_MS || 15000);
+const FRAME_CACHE_MAX_ITEMS = Number(process.env.CUTBOARD_FRAME_CACHE_MAX_ITEMS || 120);
 const server = Fastify({ logger: true });
 
 // Store connected SSE clients
@@ -103,6 +106,120 @@ function broadcastUpdate() {
   });
 }
 
+const frameMemoryCache = new Map<string, { buffer: Buffer; expiresAt: number }>();
+const frameJobs = new Map<string, Promise<Buffer>>();
+const waveformMemoryCache = new Map<string, { peaks: number[]; expiresAt: number }>();
+const waveformJobs = new Map<string, Promise<number[]>>();
+
+function getMemoryCachedFrame(key: string): Buffer | null {
+  const hit = frameMemoryCache.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt < Date.now()) {
+    frameMemoryCache.delete(key);
+    return null;
+  }
+  return hit.buffer;
+}
+
+function putMemoryCachedFrame(key: string, buffer: Buffer) {
+  frameMemoryCache.set(key, { buffer, expiresAt: Date.now() + FRAME_CACHE_TTL_MS });
+  if (frameMemoryCache.size <= FRAME_CACHE_MAX_ITEMS) return;
+  const oldest = frameMemoryCache.keys().next().value as string | undefined;
+  if (oldest) frameMemoryCache.delete(oldest);
+}
+
+function getMemoryCachedWaveform(key: string): number[] | null {
+  const hit = waveformMemoryCache.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt < Date.now()) {
+    waveformMemoryCache.delete(key);
+    return null;
+  }
+  return hit.peaks;
+}
+
+function putMemoryCachedWaveform(key: string, peaks: number[]) {
+  waveformMemoryCache.set(key, { peaks, expiresAt: Date.now() + 30000 });
+  if (waveformMemoryCache.size <= 200) return;
+  const oldest = waveformMemoryCache.keys().next().value as string | undefined;
+  if (oldest) waveformMemoryCache.delete(oldest);
+}
+
+async function fileExists(absPath: string): Promise<boolean> {
+  try {
+    await fsp.access(absPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function safeMtimeMsAsync(absPath: string): Promise<number> {
+  try {
+    const st = await fsp.stat(absPath);
+    return st.mtimeMs || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function runProcessToBuffer(
+  command: string,
+  args: string[],
+  opts?: { maxBufferBytes?: number }
+): Promise<{ status: number; stdout: Buffer; stderr: Buffer }> {
+  const maxBufferBytes = opts?.maxBufferBytes ?? 128 * 1024 * 1024;
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    let outLen = 0;
+    let errLen = 0;
+    let rejected = false;
+
+    const onChunk = (chunk: Buffer, target: Buffer[], lenRef: 'out' | 'err') => {
+      if (rejected) return;
+      const nextLen = (lenRef === 'out' ? outLen : errLen) + chunk.length;
+      if (nextLen > maxBufferBytes) {
+        rejected = true;
+        child.kill('SIGKILL');
+        reject(new Error(`Process output exceeded max buffer (${maxBufferBytes} bytes)`));
+        return;
+      }
+      if (lenRef === 'out') outLen = nextLen;
+      else errLen = nextLen;
+      target.push(chunk);
+    };
+
+    child.stdout?.on('data', (d) => onChunk(Buffer.from(d), outChunks, 'out'));
+    child.stderr?.on('data', (d) => onChunk(Buffer.from(d), errChunks, 'err'));
+    child.on('error', (err) => {
+      if (rejected) return;
+      rejected = true;
+      reject(err);
+    });
+    child.on('close', (code) => {
+      if (rejected) return;
+      resolvePromise({
+        status: code ?? -1,
+        stdout: Buffer.concat(outChunks),
+        stderr: Buffer.concat(errChunks),
+      });
+    });
+  });
+}
+
+async function readProjectNormalized(projectPath: string): Promise<Project> {
+  const raw = JSON.parse(await fsp.readFile(projectPath, 'utf-8'));
+  return normalizeProjectContract(raw).project as Project;
+}
+
+async function writeProjectNormalized(projectPath: string, project: Project): Promise<Project> {
+  const normalized = normalizeProjectContract(project);
+  await fsp.writeFile(projectPath, JSON.stringify(normalized.project, null, 2), 'utf-8');
+  return normalized.project as Project;
+}
+
 type Keyframe = { time: number; value: number };
 type Animation = { target: string; property: string; keyframes: Keyframe[] };
 
@@ -161,9 +278,9 @@ function listProjectDependencyPaths(project: Project, projectRoot: string): stri
   return deps;
 }
 
-function computeCompositionCacheKey(childRoot: string): string {
+async function computeCompositionCacheKey(childRoot: string): Promise<string> {
   const projectJson = resolve(childRoot, 'project.json');
-  const child = loadProject(childRoot);
+  const child = await readProjectNormalized(projectJson);
 
   const computedDuration = computeDuration(child.elements);
   if (!child.meta.duration || child.meta.duration < computedDuration) {
@@ -177,7 +294,7 @@ function computeCompositionCacheKey(childRoot: string): string {
     .join('\n');
 
   const h = createHash('sha1');
-  h.update(readFileSync(projectJson, 'utf-8'));
+  h.update(await fsp.readFile(projectJson, 'utf-8'));
   h.update('\n');
   h.update(JSON.stringify(child.meta));
   h.update('\n');
@@ -185,20 +302,20 @@ function computeCompositionCacheKey(childRoot: string): string {
   return h.digest('hex').slice(0, 24);
 }
 
-function resolveCompositionToCachedVideo(parentRoot: string, asset: CompositionAsset, cacheRootAbs: string): string {
+async function resolveCompositionToCachedVideo(parentRoot: string, asset: CompositionAsset, cacheRootAbs: string): Promise<string> {
   const childRoot = resolveProjectRootFromSrc(parentRoot, asset.src);
   const childProjectJson = resolve(childRoot, 'project.json');
   if (!existsSync(childProjectJson)) {
     throw new Error(`Composition asset missing child project.json at ${childProjectJson}`);
   }
 
-  const key = computeCompositionCacheKey(childRoot);
+  const key = await computeCompositionCacheKey(childRoot);
   const outAbs = resolve(cacheRootAbs, `${childRoot.split(/[\\/]/).filter(Boolean).slice(-1)[0]}-${key}.mp4`);
   mkdirSync(cacheRootAbs, { recursive: true });
 
   if (existsSync(outAbs)) return outAbs;
 
-  const childProject = loadProject(childRoot);
+  const childProject = await readProjectNormalized(childProjectJson);
   const computedDuration = computeDuration(childProject.elements);
   if (!childProject.meta.duration || childProject.meta.duration < computedDuration) {
     childProject.meta.duration = computedDuration;
@@ -209,7 +326,7 @@ function resolveCompositionToCachedVideo(parentRoot: string, asset: CompositionA
   return outAbs;
 }
 
-function buildTimeline(project: any, root: string, compositionCacheRootAbs: string): TLEntry[] {
+async function buildTimeline(project: any, root: string, compositionCacheRootAbs: string): Promise<TLEntry[]> {
   const entries: TLEntry[] = [];
   for (const [id, el] of Object.entries(project.elements || {})) {
     const e = el as any;
@@ -225,7 +342,7 @@ function buildTimeline(project: any, root: string, compositionCacheRootAbs: stri
         trimStart: e.trimStart ?? 0,
       });
     } else if (asset.type === 'composition') {
-      const cachedAbs = resolveCompositionToCachedVideo(root, asset as CompositionAsset, compositionCacheRootAbs);
+      const cachedAbs = await resolveCompositionToCachedVideo(root, asset as CompositionAsset, compositionCacheRootAbs);
       entries.push({
         id,
         src: cachedAbs,
@@ -272,8 +389,8 @@ function resolveAudioSourcePath(projectRoot: string, src: string): string {
   return resolve(projectRoot, src);
 }
 
-function buildWaveformCacheKey(absAudioPath: string, bins: number): string {
-  const st = statSync(absAudioPath);
+async function buildWaveformCacheKey(absAudioPath: string, bins: number): Promise<string> {
+  const st = await fsp.stat(absAudioPath);
   const h = createHash('sha1');
   h.update(absAudioPath);
   h.update('\n');
@@ -285,7 +402,7 @@ function buildWaveformCacheKey(absAudioPath: string, bins: number): string {
   return h.digest('hex').slice(0, 24);
 }
 
-function extractNormalizedWaveformPeaks(absAudioPath: string, bins: number): number[] {
+async function extractNormalizedWaveformPeaks(absAudioPath: string, bins: number): Promise<number[]> {
   const args = [
     '-hide_banner',
     '-loglevel',
@@ -304,12 +421,7 @@ function extractNormalizedWaveformPeaks(absAudioPath: string, bins: number): num
     'pipe:1',
   ];
 
-  const proc = spawnSync(FFMPEG, args, {
-    encoding: null,
-    maxBuffer: 128 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
+  const proc = await runProcessToBuffer(FFMPEG, args, { maxBufferBytes: 128 * 1024 * 1024 });
   if (proc.status !== 0 || !proc.stdout) {
     const err = proc.stderr ? proc.stderr.toString('utf-8') : 'Unknown ffmpeg error';
     throw new Error(`Failed to extract waveform samples: ${err}`);
@@ -341,6 +453,25 @@ function extractNormalizedWaveformPeaks(absAudioPath: string, bins: number): num
   return peaks.map((v) => Math.min(1, v / maxPeak));
 }
 
+async function computeProjectFrameFingerprint(projectPath: string, project: Project, root: string): Promise<string> {
+  const deps = listProjectDependencyPaths(project, root);
+  if (!deps.includes(projectPath)) deps.push(projectPath);
+  const mtimes = await Promise.all(
+    deps
+      .sort()
+      .map(async (p) => `${p}:${await safeMtimeMsAsync(p)}`)
+  );
+  const h = createHash('sha1');
+  h.update(JSON.stringify(project.meta));
+  h.update('\n');
+  h.update(JSON.stringify(project.animations || {}));
+  h.update('\n');
+  h.update(JSON.stringify(project.effects || {}));
+  h.update('\n');
+  h.update(mtimes.join('\n'));
+  return h.digest('hex').slice(0, 24);
+}
+
 type UploadAssetType = 'video' | 'audio' | 'image';
 
 function inferUploadAssetType(filename: string, mimetype: string): UploadAssetType | null {
@@ -363,15 +494,15 @@ function inferUploadExtension(filename: string, mimetype: string, type: UploadAs
   return '.bin';
 }
 
-function probeUploadedAsset(absPath: string, type: UploadAssetType): { duration?: number; width?: number; height?: number } {
+async function probeUploadedAsset(absPath: string, type: UploadAssetType): Promise<{ duration?: number; width?: number; height?: number }> {
   try {
-    const out = spawnSync(
+    const out = await runProcessToBuffer(
       FFPROBE,
       ['-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', absPath],
-      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }
+      { maxBufferBytes: 8 * 1024 * 1024 }
     );
     if (out.status !== 0 || !out.stdout) return {};
-    const data = JSON.parse(out.stdout);
+    const data = JSON.parse(out.stdout.toString('utf-8'));
     const videoStream = (data.streams || []).find((s: any) => s.codec_type === 'video');
     const audioStream = (data.streams || []).find((s: any) => s.codec_type === 'audio');
     const duration = Number.parseFloat(String(data.format?.duration || videoStream?.duration || audioStream?.duration || '0'));
@@ -404,15 +535,7 @@ server.get('/api/project', async (request, reply) => {
   const projectPath = query.path || PROJECT_PATH;
   
   try {
-    const data = readFileSync(projectPath, 'utf-8');
-    const normalized = normalizeProjectContract(JSON.parse(data));
-    if (normalized.changed) {
-      writeFileSync(projectPath, JSON.stringify(normalized.project, null, 2));
-      broadcastUpdate();
-      server.log.info('Normalized project.json contract fields');
-    }
-
-    return normalized.project;
+    return await readProjectNormalized(projectPath);
   } catch (error: any) {
     reply.status(500).send({ error: error.message });
   }
@@ -428,123 +551,159 @@ const getProjectFrameHandler = async (request: any, reply: any) => {
 
   try {
     const root = dirname(projectPath);
-    const normalized = normalizeProjectContract(JSON.parse(readFileSync(projectPath, 'utf-8')));
-    const project = normalized.project;
+    const project = await readProjectNormalized(projectPath);
     const meta = project.meta || {};
     const duration = Math.max(Number(meta.duration) || 1, 1);
     const t = Math.min(requestedTime, duration);
+    const fps = Math.max(1, Number(meta.fps) || 30);
+    const frameIndex = Math.max(0, Math.round(t * fps));
+    const frameTime = frameIndex / fps;
 
     const compositionCacheRootAbs = resolve(root, 'output/.cache/compositions');
-    const timeline = buildTimeline(project, root, compositionCacheRootAbs);
+    const timeline = await buildTimeline(project, root, compositionCacheRootAbs);
     const textEls = Object.values(project.elements || {}).filter((e: any) => e.type === 'text') as any[];
+    const fingerprint = await computeProjectFrameFingerprint(projectPath, project as Project, root);
+    const frameKey = `${fingerprint}-${frameIndex}`;
+    const memoryHit = getMemoryCachedFrame(frameKey);
+    if (memoryHit) {
+      return reply
+        .header('Content-Type', 'image/jpeg')
+        .header('Cache-Control', 'private, max-age=1')
+        .send(memoryHit);
+    }
 
-    const args: string[] = ['-hide_banner', '-loglevel', 'error', '-y'];
-    let fc = '';
+    const frameCacheRootAbs = resolve(root, 'output/.cache/frames');
+    await fsp.mkdir(frameCacheRootAbs, { recursive: true });
+    const frameCachePath = resolve(frameCacheRootAbs, `${frameKey}.jpg`);
 
-    if (timeline.length === 0) {
+    const existingJob = frameJobs.get(frameKey);
+    if (existingJob) {
+      const shared = await existingJob;
+      return reply
+        .header('Content-Type', 'image/jpeg')
+        .header('Cache-Control', 'private, max-age=1')
+        .send(shared);
+    }
+
+    const job = (async (): Promise<Buffer> => {
+      if (await fileExists(frameCachePath)) {
+        const bytes = await fsp.readFile(frameCachePath);
+        putMemoryCachedFrame(frameKey, bytes);
+        return bytes;
+      }
+
+      const args: string[] = ['-hide_banner', '-loglevel', 'error', '-y'];
+      let fc = '';
+
+      if (timeline.length === 0) {
+        args.push(
+          '-f', 'lavfi',
+          '-i',
+          `color=c=black:s=${meta.resolution?.width || 1920}x${meta.resolution?.height || 1080}:d=${duration}`
+        );
+
+        const fl: string[] = [];
+        let top = '[0:v]';
+
+        for (let i = 0; i < textEls.length; i++) {
+          const el = textEls[i];
+          const tr = normalizeTransform(el.transform);
+          const e = String(el.content || '')
+            .replace(/'/g, "'\\''")
+            .replace(/:/g, '\\:')
+            .replace(/\n/g, '\\n');
+          const xExpr = getAnimatedValue(el.id, 'transform.x', project.animations, tr.x);
+          const yExpr = getAnimatedValue(el.id, 'transform.y', project.animations, tr.y);
+          const en = `enable='between(t,${el.start},${el.start + el.duration})'`;
+          const nxt = i === textEls.length - 1 ? '[out]' : `[t${i}]`;
+          fl.push(`${top}drawtext=text='${e}':fontsize=${el.style?.fontSize ?? 48}:fontcolor=${el.style?.color ?? '#ffffff'}:x=${xExpr}:y=${yExpr}:${en}${nxt}`);
+          top = nxt;
+        }
+
+        fc = fl.length > 0 ? fl.join('; ') : '[0:v]copy[out]';
+      } else {
+        const assetList: string[] = [];
+        const assetIdx = new Map<string, number>();
+        for (const e of timeline) {
+          if (!assetIdx.has(e.src)) {
+            assetIdx.set(e.src, assetList.length);
+            assetList.push(e.src);
+          }
+        }
+        for (const s of assetList) args.push('-i', resolve(root, s));
+
+        const fl: string[] = [];
+        fl.push(`color=c=black:size=${meta.resolution?.width || 1920}x${meta.resolution?.height || 1080}:rate=${meta.fps || 30}:duration=${duration}[base]`);
+
+        for (let i = 0; i < timeline.length; i++) {
+          const e = timeline[i];
+          const ii = assetIdx.get(e.src)!;
+          const clipDur = e.end - e.start;
+          const fx = getVideoEffectsFilter(project, e.id);
+          fl.push(
+            `[${ii}:v]trim=start=${e.trimStart}:duration=${clipDur},setpts=PTS-STARTPTS+${e.start}/TB,` +
+            `scale=${meta.resolution?.width || 1920}:${meta.resolution?.height || 1080}:force_original_aspect_ratio=decrease,setsar=1${fx}[v${i}]`
+          );
+        }
+
+        let prev = '[base]';
+        for (let i = 0; i < timeline.length; i++) {
+          const e = timeline[i];
+          const outL = i === timeline.length - 1 ? '[vout]' : `[tmp${i}]`;
+          fl.push(`${prev}[v${i}]overlay=0:0:enable='between(t,${e.start},${e.end})'${outL}`);
+          prev = outL;
+        }
+
+        let top = '[vout]';
+        for (let i = 0; i < textEls.length; i++) {
+          const el = textEls[i];
+          const tr = normalizeTransform(el.transform);
+          const e = String(el.content || '')
+            .replace(/'/g, "'\\''")
+            .replace(/:/g, '\\:')
+            .replace(/\n/g, '\\n');
+          const xExpr = getAnimatedValue(el.id, 'transform.x', project.animations, tr.x);
+          const yExpr = getAnimatedValue(el.id, 'transform.y', project.animations, tr.y);
+          const en = `enable='between(t,${el.start},${el.start + el.duration})'`;
+          const nxt = i === textEls.length - 1 ? '[out]' : `[t${i}]`;
+          fl.push(`${top}drawtext=text='${e}':fontsize=${el.style?.fontSize ?? 48}:fontcolor=${el.style?.color ?? '#ffffff'}:x=${xExpr}:y=${yExpr}:${en}${nxt}`);
+          top = nxt;
+        }
+
+        fc = fl.join('; ');
+      }
+
       args.push(
-        '-f', 'lavfi',
-        '-i',
-        `color=c=black:s=${meta.resolution?.width || 1920}x${meta.resolution?.height || 1080}:d=${duration}`
+        '-filter_complex', fc,
+        '-map', '[out]',
+        '-ss', String(frameTime),
+        '-frames:v', '1',
+        '-an',
+        '-f', 'image2pipe',
+        '-vcodec', 'mjpeg',
+        'pipe:1'
       );
 
-      const fl: string[] = [];
-      let top = '[0:v]';
-
-      for (let i = 0; i < textEls.length; i++) {
-        const el = textEls[i];
-        const tr = normalizeTransform(el.transform);
-        const e = String(el.content || '')
-          .replace(/'/g, "'\\''")
-          .replace(/:/g, '\\:')
-          .replace(/\n/g, '\\n');
-        const xExpr = getAnimatedValue(el.id, 'transform.x', project.animations, tr.x);
-        const yExpr = getAnimatedValue(el.id, 'transform.y', project.animations, tr.y);
-        const en = `enable='between(t,${el.start},${el.start + el.duration})'`;
-        const nxt = i === textEls.length - 1 ? '[out]' : `[t${i}]`;
-        fl.push(`${top}drawtext=text='${e}':fontsize=${el.style?.fontSize ?? 48}:fontcolor=${el.style?.color ?? '#ffffff'}:x=${xExpr}:y=${yExpr}:${en}${nxt}`);
-        top = nxt;
+      const proc = await runProcessToBuffer(FFMPEG, args, { maxBufferBytes: 20 * 1024 * 1024 });
+      if (proc.status !== 0 || !proc.stdout || proc.stdout.length === 0) {
+        const err = proc.stderr ? proc.stderr.toString('utf-8') : 'Unknown ffmpeg error';
+        throw new Error(`Failed to generate proxy frame: ${err}`);
       }
+      await fsp.writeFile(frameCachePath, proc.stdout);
+      putMemoryCachedFrame(frameKey, proc.stdout);
+      return proc.stdout;
+    })();
 
-      fc = fl.length > 0 ? fl.join('; ') : '[0:v]copy[out]';
-    } else {
-      const assetList: string[] = [];
-      const assetIdx = new Map<string, number>();
-      for (const e of timeline) {
-        if (!assetIdx.has(e.src)) {
-          assetIdx.set(e.src, assetList.length);
-          assetList.push(e.src);
-        }
-      }
-      for (const s of assetList) args.push('-i', resolve(root, s));
-
-      const fl: string[] = [];
-      fl.push(`color=c=black:size=${meta.resolution?.width || 1920}x${meta.resolution?.height || 1080}:rate=${meta.fps || 30}:duration=${duration}[base]`);
-
-      for (let i = 0; i < timeline.length; i++) {
-        const e = timeline[i];
-        const ii = assetIdx.get(e.src)!;
-        const clipDur = e.end - e.start;
-        const fx = getVideoEffectsFilter(project, e.id);
-        fl.push(
-          `[${ii}:v]trim=start=${e.trimStart}:duration=${clipDur},setpts=PTS-STARTPTS+${e.start}/TB,` +
-          `scale=${meta.resolution?.width || 1920}:${meta.resolution?.height || 1080}:force_original_aspect_ratio=decrease,setsar=1${fx}[v${i}]`
-        );
-      }
-
-      let prev = '[base]';
-      for (let i = 0; i < timeline.length; i++) {
-        const e = timeline[i];
-        const outL = i === timeline.length - 1 ? '[vout]' : `[tmp${i}]`;
-        fl.push(`${prev}[v${i}]overlay=0:0:enable='between(t,${e.start},${e.end})'${outL}`);
-        prev = outL;
-      }
-
-      let top = '[vout]';
-      for (let i = 0; i < textEls.length; i++) {
-        const el = textEls[i];
-        const tr = normalizeTransform(el.transform);
-        const e = String(el.content || '')
-          .replace(/'/g, "'\\''")
-          .replace(/:/g, '\\:')
-          .replace(/\n/g, '\\n');
-        const xExpr = getAnimatedValue(el.id, 'transform.x', project.animations, tr.x);
-        const yExpr = getAnimatedValue(el.id, 'transform.y', project.animations, tr.y);
-        const en = `enable='between(t,${el.start},${el.start + el.duration})'`;
-        const nxt = i === textEls.length - 1 ? '[out]' : `[t${i}]`;
-        fl.push(`${top}drawtext=text='${e}':fontsize=${el.style?.fontSize ?? 48}:fontcolor=${el.style?.color ?? '#ffffff'}:x=${xExpr}:y=${yExpr}:${en}${nxt}`);
-        top = nxt;
-      }
-
-      fc = fl.join('; ');
-    }
-
-    args.push(
-      '-filter_complex', fc,
-      '-map', '[out]',
-      '-ss', String(t),
-      '-frames:v', '1',
-      '-an',
-      '-f', 'image2pipe',
-      '-vcodec', 'mjpeg',
-      'pipe:1'
-    );
-
-    const proc = spawnSync(FFMPEG, args, {
-      encoding: null,
-      maxBuffer: 20 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'],
+    frameJobs.set(frameKey, job);
+    const bytes = await job.finally(() => {
+      const inflight = frameJobs.get(frameKey);
+      if (inflight === job) frameJobs.delete(frameKey);
     });
-
-    if (proc.status !== 0 || !proc.stdout || proc.stdout.length === 0) {
-      const err = proc.stderr ? proc.stderr.toString('utf-8') : 'Unknown ffmpeg error';
-      return reply.status(500).send({ error: 'Failed to generate proxy frame', details: err });
-    }
 
     reply
       .header('Content-Type', 'image/jpeg')
-      .header('Cache-Control', 'no-store')
-      .send(proc.stdout);
+      .header('Cache-Control', 'private, max-age=1')
+      .send(bytes);
   } catch (error: any) {
     reply.status(500).send({ error: error.message });
   }
@@ -561,10 +720,11 @@ server.get('/api/audio/waveform', async (request, reply) => {
   const explicitSrc = typeof query.src === 'string' ? query.src : '';
   const binsRaw = Number(query.samples);
   const bins = Number.isFinite(binsRaw) ? Math.max(32, Math.min(4096, Math.floor(binsRaw))) : 512;
+  const emptyWaveform = { peaks: Array.from({ length: bins }, () => 0), cached: false };
 
   try {
     const root = dirname(projectPath);
-    const project = normalizeProjectContract(JSON.parse(readFileSync(projectPath, 'utf-8'))).project as Project;
+    const project = await readProjectNormalized(projectPath) as Project;
 
     let src = explicitSrc;
     if (!src && assetId) {
@@ -576,37 +736,59 @@ server.get('/api/audio/waveform', async (request, reply) => {
     }
 
     if (!src) {
-      return reply.status(400).send({ error: 'Missing audio source. Provide assetId or src.' });
+      return { ...emptyWaveform, error: 'Missing audio source. Provide assetId or src.' };
     }
 
     const absAudioPath = resolveAudioSourcePath(root, src);
-    if (!existsSync(absAudioPath)) {
-      return reply.status(404).send({ error: `Audio file not found: ${absAudioPath}` });
+    if (!(await fileExists(absAudioPath))) {
+      return { ...emptyWaveform, error: `Audio file not found: ${absAudioPath}` };
     }
 
     const cacheRoot = resolve(root, 'output/.cache/waveforms');
-    mkdirSync(cacheRoot, { recursive: true });
-    const cacheKey = buildWaveformCacheKey(absAudioPath, bins);
+    await fsp.mkdir(cacheRoot, { recursive: true });
+    const cacheKey = await buildWaveformCacheKey(absAudioPath, bins);
     const base = basename(absAudioPath, extname(absAudioPath)) || 'audio';
     const cachePath = resolve(cacheRoot, `${base}-${cacheKey}.json`);
+    const memKey = `${cachePath}:${bins}`;
 
-    if (existsSync(cachePath)) {
-      const cached = JSON.parse(readFileSync(cachePath, 'utf-8')) as { peaks: number[] };
+    const memHit = getMemoryCachedWaveform(memKey);
+    if (memHit) {
+      return { peaks: memHit, cached: true };
+    }
+
+    if (await fileExists(cachePath)) {
+      const cached = JSON.parse(await fsp.readFile(cachePath, 'utf-8')) as { peaks: number[] };
+      putMemoryCachedWaveform(memKey, cached.peaks);
       return {
         peaks: cached.peaks,
         cached: true,
       };
     }
 
-    const peaks = extractNormalizedWaveformPeaks(absAudioPath, bins);
-    writeFileSync(cachePath, JSON.stringify({ peaks }));
+    const existingJob = waveformJobs.get(memKey);
+    if (existingJob) {
+      const peaks = await existingJob;
+      return { peaks, cached: true };
+    }
+
+    const job = (async () => {
+      const peaks = await extractNormalizedWaveformPeaks(absAudioPath, bins);
+      await fsp.writeFile(cachePath, JSON.stringify({ peaks }));
+      putMemoryCachedWaveform(memKey, peaks);
+      return peaks;
+    })();
+    waveformJobs.set(memKey, job);
+    const peaks = await job.finally(() => {
+      const inflight = waveformJobs.get(memKey);
+      if (inflight === job) waveformJobs.delete(memKey);
+    });
 
     return {
       peaks,
       cached: false,
     };
   } catch (error: any) {
-    return reply.status(500).send({ error: error?.message || 'Failed to build waveform' });
+    return { ...emptyWaveform, error: error?.message || 'Failed to build waveform' };
   }
 });
 
@@ -642,15 +824,13 @@ server.post('/api/assets', async (request, reply) => {
   try {
     await pipeline(part.file, createWriteStream(absOutputPath));
 
-    const metadata = probeUploadedAsset(absOutputPath, assetType);
+    const metadata = await probeUploadedAsset(absOutputPath, assetType);
 
     const rel = relative(projectRoot, absOutputPath).replace(/\\/g, '/');
     const src = rel.startsWith('..') ? absOutputPath : rel;
     const assetId = src;
 
-    const raw = JSON.parse(readFileSync(projectPath, 'utf-8'));
-    const normalized = normalizeProjectContract(raw);
-    const project = normalized.project;
+    const project = await readProjectNormalized(projectPath);
 
     if (!project.assets || typeof project.assets !== 'object') project.assets = {};
 
@@ -672,13 +852,12 @@ server.post('/api/assets', async (request, reply) => {
       };
     }
 
-    const normalizedOut = normalizeProjectContract(project);
-    writeFileSync(projectPath, JSON.stringify(normalizedOut.project, null, 2));
+    const normalizedOut = await writeProjectNormalized(projectPath, project);
     broadcastUpdate();
 
     return {
       assetId,
-      asset: normalizedOut.project.assets[assetId],
+      asset: normalizedOut.assets[assetId],
       metadata,
     };
   } catch (error: any) {
@@ -695,8 +874,7 @@ server.post('/api/project/element', async (request, reply) => {
   const { projectPath = PROJECT_PATH, elementId, updates } = body;
 
   try {
-    const data = readFileSync(projectPath, 'utf-8');
-    const project = normalizeProjectContract(JSON.parse(data)).project;
+    const project = await readProjectNormalized(projectPath);
 
     if (!project.elements[elementId]) {
       return reply.status(404).send({ error: 'Element not found' });
@@ -707,16 +885,181 @@ server.post('/api/project/element', async (request, reply) => {
       ...updates
     };
 
-    const normalized = normalizeProjectContract(project);
-
-    writeFileSync(projectPath, JSON.stringify(normalized.project, null, 2));
+    const normalized = await writeProjectNormalized(projectPath, project);
     
     // Broadcast update to SSE clients
     broadcastUpdate();
     
     server.log.info(`Updated element ${elementId}`);
     
-    return normalized.project;
+    return normalized;
+  } catch (error: any) {
+    reply.status(500).send({ error: error.message });
+  }
+});
+
+// Append a new element and place it on a target track.
+server.post('/api/project/elements', async (request, reply) => {
+  const body = request.body as any;
+  const { projectPath = PROJECT_PATH, element, trackId } = body;
+
+  try {
+    if (!element || typeof element !== 'object') {
+      return reply.status(400).send({ error: 'Missing "element" object payload' });
+    }
+    if (typeof trackId !== 'string' || trackId.trim().length === 0) {
+      return reply.status(400).send({ error: 'Missing required "trackId"' });
+    }
+    if (typeof element.id !== 'string' || element.id.trim().length === 0) {
+      return reply.status(400).send({ error: 'Element must contain a non-empty string "id"' });
+    }
+
+    const project = await readProjectNormalized(projectPath);
+
+    if (project.elements[element.id]) {
+      return reply.status(409).send({ error: `Element id already exists: ${element.id}` });
+    }
+
+    let track = project.tracks.find((t) => t.id === trackId) as any | undefined;
+    if (!track) {
+      const inferredType = element?.type === 'audio' ? 'audio' : 'video';
+      const created = {
+        id: trackId,
+        type: inferredType,
+        elements: [],
+      } as any;
+      project.tracks.push(created);
+      track = created;
+    }
+
+    project.elements[element.id] = element;
+    if (!track.elements.includes(element.id)) track.elements.push(element.id);
+
+    const normalized = await writeProjectNormalized(projectPath, project);
+
+    broadcastUpdate();
+    server.log.info(`Appended element ${element.id} to track ${trackId}`);
+    return normalized;
+  } catch (error: any) {
+    reply.status(500).send({ error: error.message });
+  }
+});
+
+// Delete an element and remove it from any tracks.
+server.delete('/api/project/elements/:elementId', async (request, reply) => {
+  const params = (request.params ?? {}) as any;
+  const query = (request.query ?? {}) as any;
+  const body = (request.body ?? {}) as any;
+
+  const elementId = typeof params.elementId === 'string' ? params.elementId : '';
+  const projectPath =
+    (typeof query.projectPath === 'string' && query.projectPath.trim().length > 0 ? query.projectPath : undefined) ||
+    (typeof query.path === 'string' && query.path.trim().length > 0 ? query.path : undefined) ||
+    (typeof body.projectPath === 'string' && body.projectPath.trim().length > 0 ? body.projectPath : undefined) ||
+    PROJECT_PATH;
+
+  try {
+    if (!elementId) {
+      return reply.status(400).send({ error: 'Missing elementId' });
+    }
+
+    const project = await readProjectNormalized(projectPath);
+    if (!project.elements?.[elementId as any]) {
+      return reply.status(404).send({ error: 'Element not found' });
+    }
+
+    // Remove from elements dictionary
+    delete (project.elements as any)[elementId];
+
+    // Remove from tracks
+    if (Array.isArray(project.tracks)) {
+      for (const t of project.tracks as any[]) {
+        if (!Array.isArray(t.elements)) continue;
+        t.elements = t.elements.filter((id: any) => id !== elementId);
+      }
+      // Optional: drop empty tracks to keep the timeline tidy
+      project.tracks = (project.tracks as any[]).filter((t) => Array.isArray(t.elements) && t.elements.length > 0) as any;
+    }
+
+    // Remove animations/effects targeting this element (best-effort; schema may vary)
+    if (project.animations && typeof project.animations === 'object') {
+      for (const [id, anim] of Object.entries(project.animations as any)) {
+        if ((anim as any)?.target === elementId) delete (project.animations as any)[id];
+      }
+    }
+    if ((project as any).effects && typeof (project as any).effects === 'object') {
+      for (const [id, fx] of Object.entries((project as any).effects)) {
+        if ((fx as any)?.target === elementId) delete (project as any).effects[id];
+      }
+    }
+
+    // Recompute duration metadata (never shrink below 1s to keep UI sane)
+    const computed = computeDuration(project.elements as any);
+    project.meta.duration = Math.max(Number(project.meta.duration) || 1, computed || 0, 1);
+
+    const normalized = await writeProjectNormalized(projectPath, project);
+    broadcastUpdate();
+    server.log.info(`Deleted element ${elementId}`);
+    return normalized;
+  } catch (error: any) {
+    reply.status(500).send({ error: error.message });
+  }
+});
+
+// Reorder track layering (z-index order) by explicit track ID array.
+server.put('/api/project/tracks/reorder', async (request, reply) => {
+  const body = request.body as any;
+  const { projectPath = PROJECT_PATH, trackIds } = body;
+
+  try {
+    if (!Array.isArray(trackIds) || trackIds.some((id) => typeof id !== 'string')) {
+      return reply.status(400).send({ error: '"trackIds" must be an array of strings' });
+    }
+
+    const project = await readProjectNormalized(projectPath);
+
+    // Legacy projects may not have explicit tracks yet; bootstrap 1 track per element
+    // using deterministic IDs so frontend can reorder immediately.
+    if (!Array.isArray(project.tracks) || project.tracks.length === 0) {
+      const elementIds = Object.keys(project.elements || {});
+      project.tracks = elementIds.map((elementId) => {
+        const el = (project.elements as any)?.[elementId];
+        return {
+          id: `track_${elementId}`,
+          type: el?.type === 'audio' ? 'audio' : 'video',
+          elements: [elementId],
+        };
+      }) as any;
+    }
+
+    const currentIds = project.tracks.map((t) => t.id);
+    const uniqueRequested = new Set(trackIds);
+    if (uniqueRequested.size !== trackIds.length) {
+      return reply.status(400).send({ error: '"trackIds" contains duplicate values' });
+    }
+    if (trackIds.length !== currentIds.length) {
+      return reply.status(400).send({ error: `"trackIds" length mismatch: expected ${currentIds.length}, got ${trackIds.length}` });
+    }
+
+    for (const id of currentIds) {
+      if (!uniqueRequested.has(id)) {
+        return reply.status(400).send({ error: `Missing track id in reorder payload: ${id}` });
+      }
+    }
+    for (const id of trackIds) {
+      if (!currentIds.includes(id)) {
+        return reply.status(400).send({ error: `Unknown track id in reorder payload: ${id}` });
+      }
+    }
+
+    const byId = new Map(project.tracks.map((t) => [t.id, t] as const));
+    project.tracks = trackIds.map((id) => byId.get(id)!);
+
+    const normalized = await writeProjectNormalized(projectPath, project);
+
+    broadcastUpdate();
+    server.log.info(`Reordered tracks: ${trackIds.join(', ')}`);
+    return normalized;
   } catch (error: any) {
     reply.status(500).send({ error: error.message });
   }
@@ -728,8 +1071,7 @@ server.post('/api/project/keyframe', async (request, reply) => {
   const { projectPath = PROJECT_PATH, elementId, property, keyframeIndex, keyframeId, value, time, easing } = body;
 
   try {
-    const data = readFileSync(projectPath, 'utf-8');
-    const project = normalizeProjectContract(JSON.parse(data)).project;
+    const project = await readProjectNormalized(projectPath);
 
     const animationExists = Object.values(project.animations || {}).some(
       (anim: any) => anim.target === elementId && anim.property === property
@@ -754,15 +1096,14 @@ server.post('/api/project/keyframe', async (request, reply) => {
       keyframeIndex: typeof keyframeIndex === 'number' ? keyframeIndex : undefined,
     });
 
-    const normalized = normalizeProjectContract(project);
-    writeFileSync(projectPath, JSON.stringify(normalized.project, null, 2));
+    const normalized = await writeProjectNormalized(projectPath, project);
     
     // Broadcast update to SSE clients
     broadcastUpdate();
     
     server.log.info(`Updated keyframe ${keyframeIndex} for ${property} on element ${elementId}`);
     
-    return normalized.project;
+    return normalized;
   } catch (error: any) {
     reply.status(500).send({ error: error.message });
   }
@@ -774,8 +1115,7 @@ server.post('/api/project/animation', async (request, reply) => {
   const { projectPath = PROJECT_PATH, elementId, property, time, value, easing = 'linear', keyframeId } = body;
 
   try {
-    const data = readFileSync(projectPath, 'utf-8');
-    const project = normalizeProjectContract(JSON.parse(data)).project;
+    const project = await readProjectNormalized(projectPath);
 
     const resolvedTime = Number(time);
     const resolvedValue = Number(value);
@@ -792,15 +1132,14 @@ server.post('/api/project/animation', async (request, reply) => {
       keyframeId: typeof keyframeId === 'string' ? keyframeId : undefined,
     });
 
-    const normalized = normalizeProjectContract(project);
-    writeFileSync(projectPath, JSON.stringify(normalized.project, null, 2));
+    const normalized = await writeProjectNormalized(projectPath, project);
     
     // Broadcast update to SSE clients
     broadcastUpdate();
     
     server.log.info(`Added keyframe at t=${time}s for ${property} on element ${elementId}`);
     
-    return normalized.project;
+    return normalized;
   } catch (error: any) {
     reply.status(500).send({ error: error.message });
   }

@@ -1,0 +1,41 @@
+{
+  "version": "1.0",
+  "meta": {
+    "name": "Nested Child",
+    "fps": 30,
+    "resolution": { "width": 1920, "height": 1080 },
+    "duration": 4
+  },
+  "assets": {
+    "assets/sample-10s.mp4": {
+      "type": "video",
+      "src": "../../assets/sample-10s.mp4",
+      "duration": 0
+    }
+  },
+  "tracks": [],
+  "elements": {
+    "el_child_video": {
+      "id": "el_child_video",
+      "type": "video",
+      "assetId": "assets/sample-10s.mp4",
+      "start": 0,
+      "duration": 4,
+      "trimStart": 0,
+      "trimDuration": 4,
+      "transform": { "x": 0, "y": 0, "scale": 1, "rotation": 0, "opacity": 1 }
+    },
+    "el_child_text": {
+      "id": "el_child_text",
+      "type": "text",
+      "content": "nested child",
+      "style": { "fontSize": 72, "color": "#00ffcc" },
+      "start": 0,
+      "duration": 4,
+      "transform": { "x": 200, "y": 200, "scale": 1, "rotation": 0, "opacity": 1 }
+    }
+  },
+  "animations": {},
+  "effects": {}
+}
+

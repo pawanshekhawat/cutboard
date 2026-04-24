@@ -27,6 +27,73 @@ type Runtime = {
 };
 
 let runtime: Runtime | null = null;
+const LOCAL_EDIT_CONFLICT_HOLD_MS = 1200;
+const TIME_EPS = 1e-3;
+const canonicalAnimationIndex = new Map<string, {
+  animationId: string;
+  easing?: string;
+  keyframes: Array<{ id: string; time: number; value: number }>;
+}>();
+const localConflictUntil = new Map<string, number>();
+const writeQueues = new Map<string, Promise<void>>();
+
+function trackKey(target: string, property: string): string {
+  return `${target}::${property}`;
+}
+
+function queueWrite(key: string, op: () => Promise<void>) {
+  const prev = writeQueues.get(key) ?? Promise.resolve();
+  const next = prev
+    .catch(() => {})
+    .then(op)
+    .catch((err) => {
+      console.error(`[theatre-writeback] ${key}`, err);
+    })
+    .finally(() => {
+      if (writeQueues.get(key) === next) writeQueues.delete(key);
+    });
+  writeQueues.set(key, next);
+}
+
+function markLocalConflictWindow(target: string, property: string) {
+  localConflictUntil.set(trackKey(target, property), Date.now() + LOCAL_EDIT_CONFLICT_HOLD_MS);
+}
+
+function isLocalConflictProtected(target: string, property: string): boolean {
+  const until = localConflictUntil.get(trackKey(target, property)) ?? 0;
+  if (until <= Date.now()) {
+    localConflictUntil.delete(trackKey(target, property));
+    return false;
+  }
+  return true;
+}
+
+function approxEq(a: number, b: number, eps = TIME_EPS) {
+  return Math.abs(a - b) < eps;
+}
+
+function getCanonicalTrack(target: string, property: string) {
+  return canonicalAnimationIndex.get(trackKey(target, property));
+}
+
+function setCanonicalAnimationsFromProject(projectJson: ProjectData) {
+  canonicalAnimationIndex.clear();
+  for (const anim of Object.values(projectJson.animations || {})) {
+    const keyframes = [...(anim.keyframes || [])]
+      .filter((k) => Number.isFinite(Number(k.time)) && Number.isFinite(Number(k.value)))
+      .map((k, idx) => ({
+        id: typeof k.id === 'string' && k.id.length > 0 ? k.id : `kf_${anim.id}_${idx}`,
+        time: Number(k.time),
+        value: Number(k.value),
+      }))
+      .sort((a, b) => (a.time !== b.time ? a.time - b.time : a.id.localeCompare(b.id)));
+    canonicalAnimationIndex.set(trackKey(anim.target, anim.property), {
+      animationId: anim.id,
+      easing: anim.easing,
+      keyframes,
+    });
+  }
+}
 
 function normalizeTransform(t: any): TheatreObjectValues['transform'] {
   return {
@@ -43,10 +110,6 @@ function toPointer(obj: any, prop: string) {
   let cur = obj.props;
   for (const p of parts) cur = cur[p];
   return cur;
-}
-
-function approxEq(a: number, b: number, eps = 1e-4) {
-  return Math.abs(a - b) < eps;
 }
 
 /**
@@ -78,6 +141,7 @@ export async function initializeTheatreNative(
   const sheet = theatreProject.sheet('Scene');
 
   const elements = new Map<string, ElementRuntime>();
+  setCanonicalAnimationsFromProject(projectJson);
 
   // Create objects for each element.
   for (const el of Object.values(projectJson.elements)) {
@@ -173,6 +237,7 @@ export function getTheatreElementTransform(elementId: string) {
  */
 export function applyExternalProjectToTheatre(projectJson: ProjectData) {
   if (!runtime) return;
+  setCanonicalAnimationsFromProject(projectJson);
 
   for (const el of Object.values(projectJson.elements)) {
     const r = runtime.elements.get(el.id);
@@ -180,7 +245,9 @@ export function applyExternalProjectToTheatre(projectJson: ProjectData) {
     if (el.type === 'audio') {
       const volumeLocked = isElementLocked(el.id, 'volume');
       const startLocked = isElementLocked(el.id, 'start');
-      if (volumeLocked || startLocked) continue;
+      const volumeConflict = isLocalConflictProtected(el.id, 'volume');
+      const startConflict = isLocalConflictProtected(el.id, 'start');
+      if (volumeLocked || startLocked || volumeConflict || startConflict) continue;
       r.object.initialValue = {
         volume: typeof (el as any).volume === 'number' ? (el as any).volume : 1,
         start: typeof el.start === 'number' ? el.start : 0,
@@ -196,7 +263,15 @@ export function applyExternalProjectToTheatre(projectJson: ProjectData) {
       isElementLocked(el.id, 'transform.scale') ||
       isElementLocked(el.id, 'transform.rotation') ||
       isElementLocked(el.id, 'transform.opacity');
-    if (locked) continue;
+    const conflictProtected =
+      isLocalConflictProtected(el.id, 'transform.x') ||
+      isLocalConflictProtected(el.id, 'transform.y') ||
+      isLocalConflictProtected(el.id, 'transform.scale') ||
+      isLocalConflictProtected(el.id, 'transform.rotation') ||
+      isLocalConflictProtected(el.id, 'transform.opacity');
+    // Conflict policy: while local Theatre edits are active/recent for a property,
+    // skip applying external SSE values to avoid clobbering local user intent.
+    if (locked || conflictProtected) continue;
 
     r.object.initialValue = { transform: t };
   }
@@ -224,6 +299,14 @@ export function enableTheatreWriteBack() {
   if (!runtime) return;
   const { sheet, elements } = runtime;
 
+  function theatreHasKeyframeAtPosition(pointer: any, position: number): boolean {
+    const getter = (sheet.sequence as any).__experimental_getKeyframes;
+    if (typeof getter !== 'function') return false;
+    const keyframes = getter(pointer) as Array<{ position: number; value: number }> | undefined;
+    if (!keyframes || keyframes.length === 0) return false;
+    return keyframes.some((k) => approxEq(k.position, position));
+  }
+
   for (const [elementId, r] of elements.entries()) {
     const obj = r.object;
     const elementType = r.elementType;
@@ -234,12 +317,14 @@ export function enableTheatreWriteBack() {
       // lock all touched props during write
       for (const k of keys) lockElement(elementId, `transform.${k}`);
       try {
-        await api.updateElement(PROJECT_PATH, elementId, {
+        const updated = await api.updateElement(PROJECT_PATH, elementId, {
           transform: {
             ...(obj.value.transform as any),
             ...patch,
           },
         } as any);
+        setCanonicalAnimationsFromProject(updated);
+        for (const k of keys) markLocalConflictWindow(elementId, `transform.${k}`);
       } finally {
         for (const k of keys) unlockElement(elementId, `transform.${k}`);
       }
@@ -250,7 +335,9 @@ export function enableTheatreWriteBack() {
       if (keys.length === 0) return;
       for (const k of keys) lockElement(elementId, k);
       try {
-        await api.updateElement(PROJECT_PATH, elementId, patch as any);
+        const updated = await api.updateElement(PROJECT_PATH, elementId, patch as any);
+        setCanonicalAnimationsFromProject(updated);
+        for (const k of keys) markLocalConflictWindow(elementId, k);
       } finally {
         for (const k of keys) unlockElement(elementId, k);
       }
@@ -263,46 +350,50 @@ export function enableTheatreWriteBack() {
         const value = typeof raw === 'number' ? raw : Number(raw);
         if (!Number.isFinite(value)) return;
 
-        void (async () => {
+        queueWrite(`wb:${elementId}:transform.${prop}`, async () => {
         // Respect locks to avoid loops when applying external updates.
         const lockKey = `transform.${prop}`;
         if (isElementLocked(elementId, lockKey)) return;
 
         const position = sheet.sequence.position;
+        const track = getCanonicalTrack(elementId, lockKey);
 
-        // Determine whether this prop is sequenced and whether there is a keyframe at current time.
-        const keyframes = (sheet.sequence as any).__experimental_getKeyframes?.(pointer) as
-          | Array<{ position: number; value: number }>
-          | undefined;
-
-        if (!keyframes || keyframes.length === 0) {
+        if (!track || track.keyframes.length === 0) {
           // Static prop override
           await sendTransformPatch({ [prop]: value } as any);
           return;
         }
 
-        // Sequenced prop: find keyframe at current position (or nearest within epsilon).
-        const sorted = [...keyframes].sort((a, b) => a.position - b.position);
-        const idx = sorted.findIndex((k) => approxEq(k.position, position));
+        const idx = track.keyframes.findIndex((k) => approxEq(k.time, position));
 
         if (idx >= 0) {
-          // Update existing keyframe value (and time for safety)
+          const kf = track.keyframes[idx];
           lockElement(elementId, lockKey);
           try {
-            await api.updateKeyframe(PROJECT_PATH, elementId, `transform.${prop}`, idx, value, { time: position });
+            const updated = await api.updateKeyframe(PROJECT_PATH, elementId, lockKey, idx, value, {
+              time: position,
+              keyframeId: kf.id,
+              easing: track.easing,
+            });
+            setCanonicalAnimationsFromProject(updated);
+            markLocalConflictWindow(elementId, lockKey);
           } finally {
             unlockElement(elementId, lockKey);
           }
         } else {
-          // Add new keyframe at current position
+          // Canonical policy: for sequenced props, only add when Theatre reports
+          // a keyframe was explicitly created at this position.
+          if (!theatreHasKeyframeAtPosition(pointer, position)) return;
           lockElement(elementId, lockKey);
           try {
-            await api.addKeyframe(PROJECT_PATH, elementId, `transform.${prop}`, position, value);
+            const updated = await api.addKeyframe(PROJECT_PATH, elementId, lockKey, position, value, track.easing);
+            setCanonicalAnimationsFromProject(updated);
+            markLocalConflictWindow(elementId, lockKey);
           } finally {
             unlockElement(elementId, lockKey);
           }
         }
-        })();
+        });
       });
     };
 
@@ -311,34 +402,41 @@ export function enableTheatreWriteBack() {
       return onChange(pointer, (raw) => {
         const value = typeof raw === 'number' ? raw : Number(raw);
         if (!Number.isFinite(value)) return;
-        void (async () => {
+        queueWrite(`wb:${elementId}:${prop}`, async () => {
           if (isElementLocked(elementId, prop)) return;
           const position = sheet.sequence.position;
-          const keyframes = (sheet.sequence as any).__experimental_getKeyframes?.(pointer) as
-            | Array<{ position: number; value: number }>
-            | undefined;
-          if (!keyframes || keyframes.length === 0) {
+          const track = getCanonicalTrack(elementId, prop);
+          if (!track || track.keyframes.length === 0) {
             await sendAudioPatch({ [prop]: value } as any);
             return;
           }
-          const sorted = [...keyframes].sort((a, b) => a.position - b.position);
-          const idx = sorted.findIndex((k) => approxEq(k.position, position));
+          const idx = track.keyframes.findIndex((k) => approxEq(k.time, position));
           if (idx >= 0) {
+            const kf = track.keyframes[idx];
             lockElement(elementId, prop);
             try {
-              await api.updateKeyframe(PROJECT_PATH, elementId, prop, idx, value, { time: position });
+              const updated = await api.updateKeyframe(PROJECT_PATH, elementId, prop, idx, value, {
+                time: position,
+                keyframeId: kf.id,
+                easing: track.easing,
+              });
+              setCanonicalAnimationsFromProject(updated);
+              markLocalConflictWindow(elementId, prop);
             } finally {
               unlockElement(elementId, prop);
             }
           } else {
+            if (!theatreHasKeyframeAtPosition(pointer, position)) return;
             lockElement(elementId, prop);
             try {
-              await api.addKeyframe(PROJECT_PATH, elementId, prop, position, value);
+              const updated = await api.addKeyframe(PROJECT_PATH, elementId, prop, position, value, track.easing);
+              setCanonicalAnimationsFromProject(updated);
+              markLocalConflictWindow(elementId, prop);
             } finally {
               unlockElement(elementId, prop);
             }
           }
-        })();
+        });
       });
     };
 

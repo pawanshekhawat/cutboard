@@ -197,7 +197,7 @@ function App() {
             isPlaying={isPlaying}
           />
         </div>
-        <AssetManager project={project} onProjectRefresh={loadProject} />
+        <AssetManager project={project} currentTime={currentTime} onProjectRefresh={loadProject} />
       </main>
 
       <footer style={{ flexShrink: 0 }}>

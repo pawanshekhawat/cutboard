@@ -58,6 +58,30 @@ export interface ProjectData {
   }>;
 }
 
+export interface AddElementPayload {
+  id: string;
+  type: 'video' | 'image' | 'text' | 'audio' | 'composition';
+  assetId?: string;
+  content?: string;
+  style?: {
+    fontSize?: number;
+    color?: string;
+    fontFamily?: string;
+  };
+  start: number;
+  duration: number;
+  trimStart?: number;
+  trimDuration?: number;
+  volume?: number;
+  transform: {
+    x: number;
+    y: number;
+    scale: number;
+    rotation: number;
+    opacity: number;
+  };
+}
+
 export const api = {
   async getProject(projectPath?: string): Promise<ProjectData> {
     const response = await axios.get(buildApiUrl('/api/project'), {
@@ -148,5 +172,39 @@ export const api = {
       },
     });
     return response.data;
+  },
+
+  async createProjectElement(
+    projectPath: string | undefined,
+    element: AddElementPayload,
+    trackId: string
+  ): Promise<ProjectData> {
+    const response = await axios.post(buildApiUrl('/api/project/elements'), {
+      ...(projectPath ? { projectPath } : withProjectPath()),
+      element,
+      trackId,
+    });
+    return normalizeProjectContract(response.data).project as unknown as ProjectData;
+  },
+
+  async reorderTracks(
+    projectPath: string | undefined,
+    trackIds: string[]
+  ): Promise<ProjectData> {
+    const response = await axios.put(buildApiUrl('/api/project/tracks/reorder'), {
+      ...(projectPath ? { projectPath } : withProjectPath()),
+      trackIds,
+    });
+    return normalizeProjectContract(response.data).project as unknown as ProjectData;
+  },
+
+  async deleteProjectElement(
+    projectPath: string | undefined,
+    elementId: string
+  ): Promise<ProjectData> {
+    const response = await axios.delete(buildApiUrl(`/api/project/elements/${encodeURIComponent(elementId)}`), {
+      params: projectPath ? { projectPath } : withProjectPath(),
+    });
+    return normalizeProjectContract(response.data).project as unknown as ProjectData;
   }
 };
